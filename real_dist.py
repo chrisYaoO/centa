@@ -1,8 +1,30 @@
 from train_dist import *
+import os, argparse, torch, torch.distributed as dist
+
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--backend", type=str, default="nccl")  # GPU: nccl, CPU: gloo
+    parser.add_argument("--w_type", type=int, default=5)  # 1~7
+    args = parser.parse_args()
 
-    W_type = 5
+
+    rank = int(os.environ["RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    master_addr = os.environ["MASTER_ADDR"]
+    master_port = os.environ["MASTER_PORT"]
+
+    dist.init_process_group(
+        backend=args.backend,
+        init_method=f"tcp://{master_addr}:{master_port}",
+        rank=rank,
+        world_size=world_size,
+    )
+
+
+    W_type = args.w_type
+    n_epoch = args.epochs
     range_ = 60
     case = 1
     size = 8
@@ -24,8 +46,8 @@ if __name__ == '__main__':
     else:  # no communication
         W = np.identity(size)
 
+    W=W.cuda()
     # print(W)
-    n_epoch = 50
 
     torch.manual_seed(10 * dist.get_rank())  # 4321)#1234)
 
@@ -34,7 +56,7 @@ if __name__ == '__main__':
     test_set, test_bsz = partition_dataset_test()
 
     """ Train """
-    model = create_lenet()  # Net() #LeNet()#MLP()#AlexNet()#
+    model = create_lenet().cuda()  # Net() #LeNet()#MLP()#AlexNet()#
     # model = model
     # model = model.cuda(rank)
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
@@ -129,28 +151,29 @@ if __name__ == '__main__':
                 'run_test_time': run_test_time,
                 'n_epoch': n_epoch,
                 'worker_ID': dist.get_rank()}
-
-        if W_type == 1:
-            sio.savemat("worker_" + str(dist.get_rank()) + "_of_" + str(size) + '_' + str(
-                n_epoch) + "_epochs_Max-degree_range" + str(range_) + str(case) + ".mat", mdic)
-        elif W_type == 2:
-            sio.savemat("worker_" + str(dist.get_rank()) + "_of_" + str(size) + '_' + str(
-                n_epoch) + "_epochs_Metropolis_range" + str(range_) + str(case) + ".mat", mdic)
-        elif W_type == 3:
-            sio.savemat("worker_" + str(dist.get_rank()) + "_of_" + str(size) + '_' + str(
-                n_epoch) + "_epochs_Best-constant_range" + str(range_) + str(case) + ".mat", mdic)
-        elif W_type == 4:
-            sio.savemat(
-                "worker_" + str(dist.get_rank()) + "_of_" + str(size) + '_' + str(n_epoch) + "_epochs_FDLA_range" + str(
-                    range_) + str(case) + ".mat", mdic)
-        elif W_type == 5:
-            sio.savemat(
-                "worker_" + str(dist.get_rank()) + "_of_" + str(size) + '_' + str(n_epoch) + "_epochs_CENT_range" + str(
-                    range_) + str(case) + "_static.mat", mdic)
-        elif W_type == 6:
-            sio.savemat("worker_" + str(dist.get_rank()) + "_of_" + str(size) + '_' + str(
-                n_epoch) + "_epochs_Fully-connected_range" + str(range_) + str(case) + ".mat", mdic)
-        else:
-            sio.savemat(
-                "worker_" + str(dist.get_rank()) + "_of_" + str(size) + '_' + str(n_epoch) + "_epochs_No-consensus.mat",
-                mdic)
+        for k, v in mdic.items():
+            print(k, v)
+        # if W_type == 1:
+        #     sio.savemat("worker_" + str(dist.get_rank()) + "_of_" + str(size) + '_' + str(
+        #         n_epoch) + "_epochs_Max-degree_range" + str(range_) + str(case) + ".mat", mdic)
+        # elif W_type == 2:
+        #     sio.savemat("worker_" + str(dist.get_rank()) + "_of_" + str(size) + '_' + str(
+        #         n_epoch) + "_epochs_Metropolis_range" + str(range_) + str(case) + ".mat", mdic)
+        # elif W_type == 3:
+        #     sio.savemat("worker_" + str(dist.get_rank()) + "_of_" + str(size) + '_' + str(
+        #         n_epoch) + "_epochs_Best-constant_range" + str(range_) + str(case) + ".mat", mdic)
+        # elif W_type == 4:
+        #     sio.savemat(
+        #         "worker_" + str(dist.get_rank()) + "_of_" + str(size) + '_' + str(n_epoch) + "_epochs_FDLA_range" + str(
+        #             range_) + str(case) + ".mat", mdic)
+        # elif W_type == 5:
+        #     sio.savemat(
+        #         "worker_" + str(dist.get_rank()) + "_of_" + str(size) + '_' + str(n_epoch) + "_epochs_CENT_range" + str(
+        #             range_) + str(case) + "_static.mat", mdic)
+        # elif W_type == 6:
+        #     sio.savemat("worker_" + str(dist.get_rank()) + "_of_" + str(size) + '_' + str(
+        #         n_epoch) + "_epochs_Fully-connected_range" + str(range_) + str(case) + ".mat", mdic)
+        # else:
+        #     sio.savemat(
+        #         "worker_" + str(dist.get_rank()) + "_of_" + str(size) + '_' + str(n_epoch) + "_epochs_No-consensus.mat",
+        #         mdic)
