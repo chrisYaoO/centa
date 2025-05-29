@@ -252,16 +252,16 @@ class AlexNet(nn.Module):
 
 
 
-def partition_dataset():
+def partition_dataset(file_path):
     """ Partitioning MNIST """
     """ Assuming we have 2 replicas, then each process will have a train_set of 60000 / 2 = 30000 samples. We also divide the batch size by the number of replicas in order to maintain the overall batch size of 128."""
     """CIFAR10, EMNIST,Fashion-MNIST"""
     #print('  start loading dataset')
     #start_time = time.time()
     dataset = datasets.MNIST(
-        root = 'data',
+        root = file_path,
         train=True,
-        download=True,
+        download=False,
         transform=transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize((0.1307, ), (0.3081, ))

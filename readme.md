@@ -25,7 +25,7 @@ Note: the communication and computation time are emulated in 'generate_graphs.m'
 
 
 
-Toolbox failed start without bandwidth constraint
+Toolbox failed start  and without bandwidth constraint
 
 1. create github
 
@@ -43,5 +43,8 @@ Toolbox failed start without bandwidth constraint
 
 2. get result at .out
 
-   
+
+### Todo:
+1. put datasets to share location or sync to local_scratch before training otherwise it may affect the speed of io since multi node multi process
+2. 4 nodes first 
 

@@ -29,7 +29,7 @@ if __name__ == '__main__':
     case = 1
     size = 8
 
-    filename = 'CENT_solutions_iter1_' + str(size) + 'workers_range' + str(range_) + '.mat'
+    filename = 'fed/'+'CENT_solutions_iter1_' + str(size) + 'workers_range' + str(range_) + '.mat'
 
     if W_type == 1:  # md
         W = sio.loadmat(filename)['W_md']
@@ -52,7 +52,8 @@ if __name__ == '__main__':
     torch.manual_seed(10 * dist.get_rank())  # 4321)#1234)
 
     # here i iid data, can also use the non-iid case as in the simulation code
-    train_set, bsz = partition_dataset()
+    file_path='fed/datasets'
+    train_set, bsz = partition_dataset(file_path)
     test_set, test_bsz = partition_dataset_test()
 
     """ Train """
