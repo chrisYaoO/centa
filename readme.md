@@ -1,5 +1,3 @@
-Author: Jingrong Wang
-
 Install cvx packages on Matlab at http://cvxr.com
 
 First run 'generate_graphs.m' to obtain the network information, including the topology, comm. and comp. time
