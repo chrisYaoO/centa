@@ -1,7 +1,6 @@
 from train_dist import *
 import os, argparse, torch, torch.distributed as dist
 
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--epochs", type=int, default=50)
@@ -9,9 +8,10 @@ if __name__ == '__main__':
     parser.add_argument("--w_type", type=int, default=5)  # 1~7
     args = parser.parse_args()
 
-
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
+    print(f'rank={rank}, world_size={world_size}', flush=True)
+    print('second:', dist.get_rank(), dist.get_world_size(), flush=True)
     master_addr = os.environ["MASTER_ADDR"]
     master_port = os.environ["MASTER_PORT"]
 
@@ -22,14 +22,13 @@ if __name__ == '__main__':
         world_size=world_size,
     )
 
-
     W_type = args.w_type
     n_epoch = args.epochs
     range_ = 60
     case = 1
-    size = 8
+    size = 4
 
-    filename = 'fed/'+'CENT_solutions_iter1_' + str(size) + 'workers_range' + str(range_) + '.mat'
+    filename = 'fed/' + 'CENT_solutions_iter1_' + str(size) + 'workers_range' + str(range_) + '.mat'
 
     if W_type == 1:  # md
         W = sio.loadmat(filename)['W_md']
@@ -46,15 +45,17 @@ if __name__ == '__main__':
     else:  # no communication
         W = np.identity(size)
 
-    W=W.cuda()
-    # print(W)
+    W = W.cuda()
+    print(W)
 
     torch.manual_seed(10 * dist.get_rank())  # 4321)#1234)
 
     # here i iid data, can also use the non-iid case as in the simulation code
-    file_path='fed/datasets'
+    file_path = 'fed/datasets'
     train_set, bsz = partition_dataset(file_path)
     test_set, test_bsz = partition_dataset_test()
+
+    print('dataset loaded')
 
     """ Train """
     model = create_lenet().cuda()  # Net() #LeNet()#MLP()#AlexNet()#
@@ -74,6 +75,7 @@ if __name__ == '__main__':
     run_test_time = []
 
     iter_count = 0
+    print('start training:', rank)
     for epoch in range(n_epoch):
 
         if dist.get_rank() == 3:
