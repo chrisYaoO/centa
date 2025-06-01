@@ -1,14 +1,20 @@
 #!/bin/bash
 #SBATCH --job-name=real_dist
-#SBATCH --nodes=4
-#SBATCH --ntasks-per-node=1            # 1 GPU per process
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=1
-#SBATCH --time=00:15:00
-#SBATCH --mem=2G
+#SBATCH --time=00:05:00
+#SBATCH --mem=1G
 #SBATCH --output=%x.out
+#SBATCH --error=%x_%j.err        # 建议加上单独的 err 方便排错
 
-module load cuda/12.2
+set -euo pipefail                # 出错立即退出并打印
+set -x                           # 把每条命令 echo 出来，方便确认续行
+
+
 source venv/bin/activate
+#module load cuda/12.2
+
 
 # -------- 1. 生成 torchrun 必需的环境变量 --------
 export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
