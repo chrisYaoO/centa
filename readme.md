@@ -34,5 +34,7 @@
 4. add more nodes
 5. put datasets to share location or sync to local_scratch before training otherwise it may affect the speed of io since multi node multi process
 
+### instructions
+
 
 
