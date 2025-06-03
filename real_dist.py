@@ -13,6 +13,7 @@ import numpy as np
 import argparse
 import time
 import os, pathlib
+import pandas as pd
 
 
 class Partition(object):
@@ -153,7 +154,54 @@ def average_gradients(model, W):
     dist.barrier()
 
 
-def train_epoch(loader):
+def consensus_average(model, W: torch.Tensor, link_rate_bps):
+    rank = dist.get_rank()
+    world = dist.get_world_size()
+    assert W.shape == (world, world)
+
+    device = next(model.parameters()).device  # GPU 0, 1, ...
+    w_row = W[rank].to(device)  # move current row to gpu
+
+    # flatten grads
+    grads = [p.grad.data.view(-1) for p in model.parameters()
+             if p.grad is not None]
+    flat = torch.cat(grads)  # (d,)
+
+    # find out connected neighbors(non-zero) and create buffer for each
+    nbr_ids = [j for j, w in enumerate(w_row) if j != rank and w != 0]
+    recv_bufs = {j: torch.empty_like(flat) for j in nbr_ids}
+
+    # p2p send/rec
+    reqs = []
+    for j in nbr_ids:
+        reqs.append(dist.isend(flat, dst=j))
+        reqs.append(dist.irecv(recv_bufs[j], src=j))
+    for r in reqs:
+        r.wait()
+
+    torch.cuda.synchronize()
+
+    # bandwidth limit(in time)
+    if link_rate_bps is not None:
+        bytes_total = flat.numel() * flat.element_size() * len(nbr_ids)
+        time.sleep(bytes_total * 8 / link_rate_bps)
+    # weighted aggreagation
+    mixed = w_row[rank] * flat  # itself
+    for j in nbr_ids:
+        mixed += w_row[j] * recv_bufs[j]
+
+    # normalize: mixed /= w_row.sum()
+
+    # update the grad
+    idx = 0
+    for p in model.parameters():
+        if p.grad is None: continue
+        n = p.grad.data.numel()
+        p.grad.data.copy_(mixed[idx:idx + n].view_as(p.grad))
+        idx += n
+
+
+def train_epoch(loader, W, link_rate_bps):
     model.train()
     epoch_loss, correct, total = 0.0, 0, 0
 
@@ -166,7 +214,9 @@ def train_epoch(loader):
         loss = cec(output, target)
 
         loss.backward()
-        average_gradients(model, W_gpu)
+
+        consensus_average(model, W_gpu, link_rate_bps=None)
+
         optimizer.step()
 
         # stats
@@ -223,7 +273,7 @@ if __name__ == '__main__':
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    print('device: ',device)
+    print('device: ', device)
 
     # parse param
     parser = argparse.ArgumentParser()
@@ -271,6 +321,8 @@ if __name__ == '__main__':
     print(W)
 
     W = [[0.5, 0.5], [0.5, 0.5]]
+    BW = 20 * 1e6  # 20 Mb/s  -->  20 MHz(≈1 bps/Hz)
+    # BW = None
 
     W_gpu = torch.tensor(W, dtype=torch.float32,
                          device=torch.cuda.current_device(),
@@ -292,27 +344,35 @@ if __name__ == '__main__':
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     cec = nn.CrossEntropyLoss().to(device)
 
-    batch_loss = []
-    batch_accuracy = []
-    run_time = []
-    run_comp_time = []
+    # batch_loss = []
+    # batch_accuracy = []
+    # run_time = []
+    # run_comp_time = []
+    #
+    # batch_test_loss = []
+    # batch_test_accuracy = []
+    # run_test_time = []
+    timeline = []
+    train_acc_list = []
+    test_acc_list = []
 
-    batch_test_loss = []
-    batch_test_accuracy = []
-    run_test_time = []
+    start_time = time.time()
 
     print('start training:', rank)
     for epoch in range(n_epoch):
 
-        train_loss, train_acc = train_epoch(train_set)
+        train_loss, train_acc = train_epoch(train_set, W_gpu,BW)
+        val_loss, val_acc = evaluate(test_set)
 
         if rank == 0:
-            print(f"[Epoch {epoch:03d}] "
-                  f"train loss {train_loss:.4f}  acc {train_acc:.2f}%")
+            elapsed_time = time.time() - start_time
+            timeline.append(elapsed_time)
+            train_acc_list.append(train_acc)
+            test_acc_list.append(val_acc)
 
-            val_loss, val_acc = evaluate(test_set)
             print(f"[Epoch {epoch:03d}] "
-                  f"val   loss {val_loss:.4f}  acc {val_acc:.2f}%")
+                  f"train loss {train_loss:.4f}  acc {train_acc:.2f}%  "
+                  f"val loss {val_loss:.4f}  acc {val_acc:.2f}%")
 
     # if dist.get_rank() in output_all(flag):
     #     mdic = {'batch_training_loss': batch_loss,
@@ -326,7 +386,12 @@ if __name__ == '__main__':
     #             'worker_ID': dist.get_rank()}
     #     for k, v in mdic.items():
     #         print(k, v)
+    df = pd.DataFrame({
+        'time': timeline,
+        'train_acc': train_acc_list,
+        'test_acc': test_acc_list
+    })
+    df.to_csv('accuracy_vs_time.csv', index=False)
 
     # end process in case memory leak
     dist.destroy_process_group()
-
