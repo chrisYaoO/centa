@@ -132,19 +132,74 @@ def create_lenet():
     return model
 
 
+@torch.no_grad()
 def average_gradients(model, W):
     """ Gradient averaging. """
 
-    ID = dist.get_rank()
-    size = int(dist.get_world_size())
+    rank = dist.get_rank()
+    world = dist.get_world_size()
 
-    for param in model.parameters():
-        # 1. 在「参数所在的 GPU」上建临时缓冲
-        tensor_list = [torch.empty_like(param.data)
-                       for _ in range(size)]
-        dist.all_gather(tensor_list, param.data)
+    for p in model.parameters():
+        if p.grad is None:  # 这层没有梯度就跳过
+            continue
 
-        param.data = sum(W[ID][i] * tensor_list[i] for i in range(size))
+            # 收集所有节点的梯度到 buf（GPU 上）
+        buf = [torch.empty_like(p.grad) for _ in range(world)]
+        dist.all_gather(buf, p.grad)
+
+        # 加权求和：gᵢ ← Σⱼ Wᵢⱼ · gⱼ
+        p.grad[:] = sum(W_gpu[rank, j].item() * buf[j] for j in range(world))
+
+    dist.barrier()
+
+
+def train_epoch(loader):
+    model.train()
+    epoch_loss, correct, total = 0.0, 0, 0
+
+    for data, target in loader:  # mini-batch loop
+        data = data.to(device, non_blocking=True)
+        target = target.to(device, non_blocking=True)
+        optimizer.zero_grad(set_to_none=True)
+
+        output = model(data)
+        loss = cec(output, target)
+
+        loss.backward()
+        average_gradients(model, W_gpu)
+        optimizer.step()
+
+        # stats
+        epoch_loss += loss.item() * target.size(0)
+        pred = output.argmax(dim=1)
+        correct += (pred == target).sum().item()
+        total += target.size(0)
+
+    avg_loss = epoch_loss / total
+    acc = 100. * correct / total
+    return avg_loss, acc
+
+
+@torch.no_grad()
+def evaluate(loader):
+    model.eval()
+    loss_sum, correct, total = 0.0, 0, 0
+
+    for data, target in loader:
+        data = data.to(device, non_blocking=True)
+        target = target.to(device, non_blocking=True)
+
+        output = model(data)
+        loss = cec(output, target)
+
+        loss_sum += loss.item() * target.size(0)
+        pred = output.argmax(dim=1)
+        correct += (pred == target).sum().item()
+        total += target.size(0)
+
+    avg_loss = loss_sum / total
+    acc = 100. * correct / total
+    return avg_loss, acc
 
 
 def output_all(flag):
@@ -155,18 +210,22 @@ def output_all(flag):
 
 
 if __name__ == '__main__':
+    # set cuda
     print("cwd =", pathlib.Path.cwd())
-
-    print("torch.version.cuda  :", torch.version.cuda)  # 编译期用的 CUDA 主版本号
-    print("torch.version.git   :", torch.version.git_version)  # 方便确认 wheel 来源
+    print("torch.version.cuda  :", torch.version.cuda)
+    print("torch.version.git   :", torch.version.git_version)
     print("cuda.is_available() :", torch.cuda.is_available())
     if torch.cuda.is_available():
         print("Driver capability :", torch.cuda.get_device_capability(0))
         print("Device name       :", torch.cuda.get_device_name(0))
-    print(torch.cuda.is_available())
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(device)
+    else:
+        print('cuda not available!!!!')
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    print('device: ',device)
+
+    # parse param
     parser = argparse.ArgumentParser()
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--backend", type=str, default="nccl")  # GPU: nccl, CPU: gloo
@@ -179,20 +238,21 @@ if __name__ == '__main__':
     master_addr = os.environ["MASTER_ADDR"]
     master_port = os.environ["MASTER_PORT"]
 
+    # init multi nodes
     dist.init_process_group(backend=args.backend, init_method="env://")
 
-    print('init success')
-    # print(f'second: rank={dist.get_rank()}, worldsize={dist.get_world_size()}', flush=True)
+    print('init multi node success')
 
+    # load weight matrix and put it on gpu
     W_type = args.w_type
     n_epoch = args.epochs
     range_ = 60
     case = 1
     size = 4
+    flag = 0
 
     filename = 'fed/' + 'CENT_solutions_iter1_' + str(size) + 'workers_range' + str(range_) + '.mat'
-    print(filename)
-
+    # print(filename)
     if W_type == 1:  # md
         W = sio.loadmat(filename)['W_md']
     elif W_type == 2:  # mh
@@ -207,28 +267,31 @@ if __name__ == '__main__':
         W = np.ones((int(size), int(size))) * (1 / size)
     else:  # no communication
         W = np.identity(size)
-
     print('w read success')
     print(W)
 
-    W = W.to(device)
+    W = [[0.5, 0.5], [0.5, 0.5]]
 
-    torch.manual_seed(10 * dist.get_rank())  # 4321)#1234)
+    W_gpu = torch.tensor(W, dtype=torch.float32,
+                         device=torch.cuda.current_device(),
+                         requires_grad=False)
 
+    # training prepration
+
+    torch.manual_seed(10 * dist.get_rank())
+
+    # load MNIST dataset
     # here i iid data, can also use the non-iid case as in the simulation code
     file_path = 'fed/datasets'
     train_set, bsz = partition_dataset(file_path)
     test_set, test_bsz = partition_dataset_test(file_path)
-    # print(bsz,test_bsz)
     print('dataset loaded')
 
-    model = create_lenet().to(device)  # Net() #LeNet()#MLP()#AlexNet()#
-    # model = model
-    # model = model.cuda(rank)
+    # model settings
+    model = create_lenet().to(device)
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     cec = nn.CrossEntropyLoss().to(device)
-    # optimizer = optim.SGD(model.parameters(), lr=0.05, momentum=0.5)
-    # num_batches = ceil(len(train_set.dataset) / float(bsz))
+
     batch_loss = []
     batch_accuracy = []
     run_time = []
@@ -238,111 +301,32 @@ if __name__ == '__main__':
     batch_test_accuracy = []
     run_test_time = []
 
-    iter_count = 0
-    flag = 1
     print('start training:', rank)
     for epoch in range(n_epoch):
 
-        if dist.get_rank() == output_all(flag):
-            print('epoch =', epoch)
+        train_loss, train_acc = train_epoch(train_set)
 
-        epoch_loss = 0.0
-        correct = 0
-        total = 0
-        batch_idx = 0
+        if rank == 0:
+            print(f"[Epoch {epoch:03d}] "
+                  f"train loss {train_loss:.4f}  acc {train_acc:.2f}%")
 
-        for data, target in train_set:
-            batch_idx += 1
+            val_loss, val_acc = evaluate(test_set)
+            print(f"[Epoch {epoch:03d}] "
+                  f"val   loss {val_loss:.4f}  acc {val_acc:.2f}%")
 
-            data = data.to(device, non_blocking=True)
-            target = target.to(device, non_blocking=True)
-            # data, target = Variable(data.cuda(rank)), Variable(target.cuda(rank))
-            optimizer.zero_grad()
-            output = model(data)
-            # loss = F.nll_loss(output, target)
-            loss = cec(output, target)
+    # if dist.get_rank() in output_all(flag):
+    #     mdic = {'batch_training_loss': batch_loss,
+    #             'batch_training_accuracy': batch_accuracy,
+    #             'run_training_time': run_time,
+    #             'run_comp_time': run_comp_time,
+    #             'batch_test_loss': batch_test_loss,
+    #             'batch_test_accuracy': batch_test_accuracy,
+    #             'run_test_time': run_test_time,
+    #             'n_epoch': n_epoch,
+    #             'worker_ID': dist.get_rank()}
+    #     for k, v in mdic.items():
+    #         print(k, v)
 
-            epoch_loss += loss.item()  # data[0]
-            loss.backward()
+    # end process in case memory leak
+    dist.destroy_process_group()
 
-            average_gradients(model, W)
-
-            optimizer.step()
-            _, predicted = output.max(1)
-            total += target.size(0)
-            correct += predicted.eq(target).sum().item()
-
-            """append data"""
-            batch_loss.append(epoch_loss / (batch_idx + 1))
-            batch_accuracy.append(100. * correct / total)
-
-            if dist.get_rank() == output_all(flag):
-                if batch_idx % int(len(train_set) / 5) == 0:
-                    print(batch_idx, len(train_set), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
-                          % (epoch_loss / (batch_idx + 1), 100. * correct / total, correct, total))
-            iter_count += 1
-
-        if dist.get_rank() == output_all(flag):
-            """ Test """
-            test_epoch_loss = 0.0
-            test_correct = 0
-            test_total = 0
-            test_batch_idx = 0
-
-            # test_start_time = time.time()
-
-            for data, target in test_set:
-                test_batch_idx += 1
-
-                data, target = Variable(data), Variable(target)
-
-                output = model(data)
-                loss = F.nll_loss(output, target)
-                test_epoch_loss += loss.item()  # data[0]
-                _, predicted = output.max(1)
-                test_total += target.size(0)
-                test_correct += predicted.eq(target).sum().item()
-                print(test_batch_idx, len(test_set), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
-                      % (test_epoch_loss / (test_batch_idx + 1), 100. * test_correct / test_total, test_correct,
-                         test_total))
-
-            """append data"""
-            batch_test_loss.append(test_epoch_loss / (test_batch_idx + 1))
-            batch_test_accuracy.append(100. * test_correct / test_total)
-
-    if dist.get_rank() == output_all(flag):
-        mdic = {'batch_training_loss': batch_loss,
-                'batch_training_accuracy': batch_accuracy,
-                'run_training_time': run_time,
-                'run_comp_time': run_comp_time,
-                'batch_test_loss': batch_test_loss,
-                'batch_test_accuracy': batch_test_accuracy,
-                'run_test_time': run_test_time,
-                'n_epoch': n_epoch,
-                'worker_ID': dist.get_rank()}
-        for k, v in mdic.items():
-            print(k, v)
-        # if W_type == 1:
-        #     sio.savemat("worker_" + str(dist.get_rank()) + "_of_" + str(size) + '_' + str(
-        #         n_epoch) + "_epochs_Max-degree_range" + str(range_) + str(case) + ".mat", mdic)
-        # elif W_type == 2:
-        #     sio.savemat("worker_" + str(dist.get_rank()) + "_of_" + str(size) + '_' + str(
-        #         n_epoch) + "_epochs_Metropolis_range" + str(range_) + str(case) + ".mat", mdic)
-        # elif W_type == 3:
-        #     sio.savemat("worker_" + str(dist.get_rank()) + "_of_" + str(size) + '_' + str(
-        #         n_epoch) + "_epochs_Best-constant_range" + str(range_) + str(case) + ".mat", mdic)
-        # elif W_type == 4:
-        #     sio.savemat(
-        #         "worker_" + str(dist.get_rank()) + "_of_" + str(size) + '_' + str(n_epoch) + "_epochs_FDLA_range" + str(
-        #             range_) + str(case) + ".mat", mdic)
-        # elif W_type == 5:
-        #     sio.savemat(
-        #         "worker_" + str(dist.get_rank()) + "_of_" + str(size) + '_' + str(n_epoch) + "_epochs_CENT_range" + str(
-        #             range_) + str(case) + "_static.mat", mdic)
-        # elif W_type == 6:
-        #     sio.savemat("worker_" + str(dist.get_rank()) + "_of_" + str(size) + '_' + str(
-        #         n_epoch) + "_epochs_Fully-connected_range" + str(range_) + str(case) + ".mat", mdic)
-        # else:
-        #     sio.savemat(
-        #         "worker_" + str(dist.get_rank()) + "_of_" + str(size) + '_' + str(n_epoch) + "_epochs_No-consensus.mat",
-        #         mdic)

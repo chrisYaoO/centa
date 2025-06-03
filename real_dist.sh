@@ -3,11 +3,11 @@
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=1
-#SBATCH --time=00:05:00
-#SBATCH --mem=1G
-#SBATCH --output=%x_%j_%N_%t.out
+#SBATCH --time=00:15:00
+#SBATCH --mem=3G
+#SBATCH --output=%x_%j_%t.out
 
-set -euo pipefail                # 出错立即退出并打印
+set -euo pipefail                # print and exit immediately after error
 set -x
 
 
@@ -19,10 +19,12 @@ export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
 export MASTER_PORT=29500               # keep port available
 export WORLD_SIZE=$SLURM_NTASKS
 export PYTHONUNBUFFERED=1
-export TORCH_DIST_DEBUG=DETAIL          # 打开 elastic 异常追踪
-export TORCH_SHOW_CPP_STACKTRACES=1     # C++ 栈
-export NCCL_DEBUG=INFO                  # NCCL 握手细节
-export PYTHONFAULTHANDLER=1
+export TORCH_DIST_DEBUG=DETAIL
+export TORCH_SHOW_CPP_STACKTRACES=1     # C++
+export NCCL_DEBUG=INFO                  # NCCL
+export NCCL_ASYNC_ERROR_HANDLING=1     # sync error
+export PYTHONFAULTHANDLER=1            # python error
+export CUDA_LAUNCH_BLOCKING=1          # GPU error
 
 
 srun --label python -m torch.distributed.run \
@@ -32,6 +34,6 @@ srun --label python -m torch.distributed.run \
      --rdzv_backend=c10d \
      --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
      real_dist.py \
-     --epochs 60 \
+     --epochs 10 \
      --backend nccl \
      --w_type 5
