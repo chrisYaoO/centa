@@ -52,7 +52,7 @@ class DataPartitioner(object):
         return Partition(self.data, self.partitions[partition])
 
 
-def partition_dataset(file_path):
+def partition_dataset(file_path, bsz):
     """ Partitioning MNIST """
     """ Assuming we have 2 replicas, then each process will have a train_set of 60000 / 2 = 30000 samples. We also divide the batch size by the number of replicas in order to maintain the overall batch size of 128."""
     """CIFAR10, EMNIST,Fashion-MNIST"""
@@ -67,11 +67,8 @@ def partition_dataset(file_path):
             transforms.Normalize((0.1307,), (0.3081,))
         ]))
 
-    # print('  dataset',dataset)
     size = dist.get_world_size()
-    # print('  size',size)
-    bsz = 64  # int(256*50/ float(size))#int(256)#int(128 / float(size))
-    # print('  bsz',bsz)
+    # bsz = 64  # int(256*50/ float(size))#int(256)#int(128 / float(size))
     partition_sizes = [1.0 / size for _ in range(size)]
     # print('  partition_sizes',partition_sizes)
     partition = DataPartitioner(dataset, partition_sizes)
@@ -82,7 +79,7 @@ def partition_dataset(file_path):
     return train_set, bsz
 
 
-def partition_dataset_test(filepath):
+def partition_dataset_test(filepath, bsz):
     """ Partitioning MNIST """
     """ Assuming we have 2 replicas, then each process will have a train_set of 60000 / 2 = 30000 samples. We also divide the batch size by the number of replicas in order to maintain the overall batch size of 128."""
     """CIFAR10, EMNIST,Fashion-MNIST"""
@@ -104,7 +101,7 @@ def partition_dataset_test(filepath):
     # partition_sizes = [1.0 / size for _ in range(size)]
     # #print('  partition_sizes',partition_sizes)
 
-    bsz = 10000  # int(128 / float(size))
+    # bsz = 10000  # int(128 / float(size))
     # #print('  bsz',bsz)
 
     # partition = DataPartitioner(dataset, partition_sizes)
@@ -317,10 +314,17 @@ if __name__ == '__main__':
         W = np.ones((int(size), int(size))) * (1 / size)
     else:  # no communication
         W = np.identity(size)
+
+
+    # W = [[0.5, 0.5], [0.5, 0.5]]
+    W = [[1 / 3, 1 / 3, 0, 1 / 3],
+         [1 / 3, 1 / 3, 1 / 3, 0],
+         [0, 1 / 3, 1 / 3, 1 / 3],
+         [1 / 3, 0, 1 / 3, 1 / 3]]
+
     print('w read success')
     print(W)
 
-    W = [[0.5, 0.5], [0.5, 0.5]]
     BW = 20 * 1e6  # 20 Mb/s  -->  20 MHz(≈1 bps/Hz)
     # BW = None
 
@@ -335,8 +339,8 @@ if __name__ == '__main__':
     # load MNIST dataset
     # here i iid data, can also use the non-iid case as in the simulation code
     file_path = 'fed/datasets'
-    train_set, bsz = partition_dataset(file_path)
-    test_set, test_bsz = partition_dataset_test(file_path)
+    train_set, bsz = partition_dataset(file_path, bsz=4096)
+    test_set, test_bsz = partition_dataset_test(file_path, bsz=10000)
     print('dataset loaded')
 
     # model settings
@@ -361,7 +365,7 @@ if __name__ == '__main__':
     print('start training:', rank)
     for epoch in range(n_epoch):
 
-        train_loss, train_acc = train_epoch(train_set, W_gpu,BW)
+        train_loss, train_acc = train_epoch(train_set, W_gpu, BW)
         val_loss, val_acc = evaluate(test_set)
 
         if rank == 0:
@@ -386,12 +390,13 @@ if __name__ == '__main__':
     #             'worker_ID': dist.get_rank()}
     #     for k, v in mdic.items():
     #         print(k, v)
-    df = pd.DataFrame({
-        'time': timeline,
-        'train_acc': train_acc_list,
-        'test_acc': test_acc_list
-    })
-    df.to_csv('accuracy_vs_time.csv', index=False)
+    if rank == 0:
+        df = pd.DataFrame({
+            'time': timeline,
+            'train_acc': train_acc_list,
+            'test_acc': test_acc_list
+        })
+        df.to_csv('data/accuracy_vs_time.csv', index=False)
 
     # end process in case memory leak
     dist.destroy_process_group()
