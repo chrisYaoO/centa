@@ -29,9 +29,9 @@
 
 ### Todo:
 1. adjust the model and dataset (current gpu utilization is very low :0.5%)
-2. integrate bandwidth limitation and network topology 
+2. integrate bandwidth limitation and network topology done
 3. generalize the task procedure 
-4. add more nodes
+4. add more nodes 4
 5. put datasets to share location or sync to local_scratch before training otherwise it may affect the speed of io since multi node multi process
 
 ### instructions
