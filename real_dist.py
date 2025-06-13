@@ -100,6 +100,64 @@ class DataPartitioner(object):
         return Partition(self.data, self.partitions[partition])
 
 
+class DataPartitioner_niid(object):
+    """ Partitions a dataset into different chuncks. """
+
+    def __init__(self, data, indexes, seed=1234):
+        self.data = data
+        self.partitions = indexes
+
+    def use(self, partition):
+        return Partition(self.data, self.partitions[partition])
+
+
+def partition_dataset_niid(file_path: str, p: int, bsz: int):
+    """ Partitioning MNIST """
+
+    dataset = datasets.MNIST(
+        root=file_path,
+        train=True,
+        download=False,
+        transform=transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.1307,), (0.3081,))
+        ]))
+
+    N_class = 10
+    size = dist.get_world_size()
+
+    """ create 10*6000 index list"""
+    labels = dataset.targets.tolist()
+    index_pos_list = [(labels == i).nonzero(as_tuple=True)[0].tolist() for i in range(N_class)]
+
+    x = 0
+    y = 0
+    z = 0
+    index_list = []
+    N_ = int((len(dataset) / size) / p)
+    for i in range(size):
+        index_list_worker = []
+        for j in range(p):
+            index_list_worker = index_list_worker + index_pos_list[y][z * N_:(z + 1) * N_]
+            if y == N_class - 1:  # move to the next class
+                y = 0
+                z += 1
+            else:
+                y += 1
+        x += 1  # move to the next worker
+        index_list.append(index_list_worker)
+
+    partition = DataPartitioner_niid(dataset, index_list)
+    train_set = []
+    for i in range(size):
+        partition_ = partition.use(i)
+        train_set_ = torch.utils.data.DataLoader(
+            partition_, batch_size=bsz, shuffle=True)
+        # print('  train_set',len(train_set))
+        train_set.append(train_set_)
+    return train_set  # n by 60000/n matrixs
+
+
 def partition_dataset(file_path, bsz):
     """ Partitioning MNIST """
     """ Assuming we have 2 replicas, then each process will have a train_set of 60000 / 2 = 30000 samples. We also divide the batch size by the number of replicas in order to maintain the overall batch size of 128."""
@@ -565,6 +623,49 @@ def load_matrix(filename, size: int, W_type=5):
     return W, B_ij
 
 
+def create_model(model_name, rank):
+    model_map = {
+        'lenet': create_lenet,
+        'alexnet': AlexNet,
+        'cnn': CNN_Net,
+        'net': Net,
+        'MLP': MLP
+    }
+
+    if model_name not in model_map:
+        raise ValueError(f'Model type "{model_name}" not supported.')
+
+    model_fn = model_map[model_name]
+    model = model_fn().to(device)
+    global_model = model_fn().to(device) if rank == 0 else None
+
+    return model, global_model
+
+
+@torch.no_grad()
+def update_global_model(local_model, global_model):
+    world_size = dist.get_world_size()
+    rank = dist.get_rank()
+
+    for (name, param) in local_model.named_parameters():
+        tmp = param.data.clone()
+
+        dist.reduce(tmp, dst=0, op=dist.ReduceOp.SUM)
+
+        if rank == 0:
+            tmp /= world_size
+            global_param = dict(global_model.named_parameters())[name]
+            global_param.copy_(tmp)
+
+    for (name, buf) in local_model.named_buffers():
+        tmp = buf.data.clone()
+        dist.reduce(tmp, dst=0, op=dist.ReduceOp.SUM)
+        if rank == 0:
+            tmp /= world_size
+            global_buf = dict(global_model.named_buffers())[name]
+            global_buf.copy_(tmp)
+
+
 if __name__ == '__main__':
     # parse param
     parser = argparse.ArgumentParser()
@@ -618,9 +719,8 @@ if __name__ == '__main__':
     W_type = args.w_type
     n_epoch = args.epochs
     range_ = 60
-    case = 1
     size = 4
-    flag = 0
+    p = 6 # num labels 1-10
 
     filename = 'fed/' + 'CENT_solutions_iter1_' + str(size) + 'workers_range' + str(range_) + '.mat'
     W, B_ij = load_matrix(filename, size, W_type)
@@ -651,24 +751,13 @@ if __name__ == '__main__':
     # load MNIST dataset
     # here i iid data, can also use the non-iid case as in the simulation code
     file_path = 'fed/datasets'
-    train_set, bsz = partition_dataset(file_path, bsz=4096)
+    train_set, bsz = partition_dataset_niid(file_path, p=6, bsz=4096)
     test_set, test_bsz = partition_dataset_test(file_path, bsz=10000)
     logger.debug('dataset loaded')
 
     # model settings
     model_name = args.model
-    if model_name == 'lenet':
-        model = create_lenet().to(device)
-    elif model_name == 'alexnet':
-        model = AlexNet().to(device)
-    elif model_name == 'cnn':
-        model = CNN_Net().to(device)
-    elif model_name == 'net':
-        model = Net().to(device)
-    elif model_name == 'MLP':
-        model = MLP().to(device)
-    else:
-        raise ValueError('Model type not supported')
+    model, global_model = create_model(model_name, rank=rank)
 
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     cec = nn.CrossEntropyLoss().to(device)
@@ -682,9 +771,11 @@ if __name__ == '__main__':
     logger.info(f'start training:{rank}')
     for epoch in range(n_epoch):
         train_loss, train_acc = train_epoch(train_set, W_gpu, B_ij_gpu)
-        val_loss, val_acc = evaluate(test_set)
+
+        update_global_model(model, global_model)
 
         if rank == 0:
+            val_loss, val_acc = evaluate(test_set, model)
             elapsed_time = time.time() - start_time
             timeline.append(elapsed_time)
             train_acc_list.append(train_acc)
@@ -700,7 +791,7 @@ if __name__ == '__main__':
             'train_acc': train_acc_list,
             'test_acc': test_acc_list
         })
-        df.to_csv('data/accuracy_vs_time.csv', index=False)
+        df.to_csv(f'data/acc_vs_time_{model_name}_{args.dataset}_{world_size}_{p}_w_{W_type}_epoch_{n_epoch}.csv', index=False)
         logger.info('data saved')
 
     # end process in case memory leak
