@@ -1,5 +1,7 @@
 import os
 
+from objax.zoo.convnet import ConvNet
+
 os.environ.setdefault("MPI4PY_RC_CUDA", "yes")
 
 import mpi4py
@@ -176,6 +178,164 @@ def create_lenet():
     return model
 
 
+class CNN_Net(nn.Module):
+    """ Network architecture. """
+
+    # summary(model,(3,28,28))
+    def __init__(self):
+        super(CNN_Net, self).__init__()
+        self.conv1 = nn.Conv2d(1, 10, kernel_size=5)
+        self.conv2 = nn.Conv2d(10, 20, kernel_size=5)
+        self.conv2_drop = nn.Dropout2d()
+        self.fc1 = nn.Linear(320, 50)
+        self.fc2 = nn.Linear(50, 10)
+
+    def forward(self, x):
+        x = F.relu(F.max_pool2d(self.conv1(x), 2))
+        x = F.relu(F.max_pool2d(self.conv2_drop(self.conv2(x)), 2))
+        x = x.view(-1, 320)
+        x = F.relu(self.fc1(x))
+        x = F.dropout(x, training=self.training)
+        x = self.fc2(x)
+        return F.log_softmax(x)
+
+    """On the first case (using dim=1) the softmax function is applied along the axis 1 . That’s why all rows add up to 1. On the second case (using dim=0) the softmax function is applied along the axis 0. Making all the columns add up to 1."""
+    """For matrices, it’s 1. For others, it’s 0."""
+
+
+## deeper model adapted from https://www.kaggle.com/gustafsilva/cnn-digit-recognizer-pytorch
+class Net(nn.Module):
+    def __init__(self):
+        super(Net, self).__init__()
+        # summary(model,(1,28,28))
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(1, 32, 3, padding=1),
+            nn.ReLU(),
+            nn.BatchNorm2d(32),
+            nn.Conv2d(32, 32, 3, padding=1),
+            nn.ReLU(),
+            nn.BatchNorm2d(32),
+            nn.Conv2d(32, 32, 3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.BatchNorm2d(32),
+            nn.MaxPool2d(2, 2),
+            nn.Dropout(0.25)
+        )
+
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(32, 64, 3, padding=1),
+            nn.ReLU(),
+            nn.BatchNorm2d(64),
+            nn.Conv2d(64, 64, 3, padding=1),
+            nn.ReLU(),
+            nn.BatchNorm2d(64),
+            nn.Conv2d(64, 64, 3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.BatchNorm2d(64),
+            nn.MaxPool2d(2, 2),
+            nn.Dropout(0.25)
+        )
+
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(64, 128, 3, padding=1),
+            nn.ReLU(),
+            nn.BatchNorm2d(128),
+            nn.MaxPool2d(2, 2),
+            nn.Dropout(0.25)
+        )
+
+        self.fc = nn.Sequential(
+            nn.Linear(128, 10)
+        )
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.conv3(x)
+
+        x = x.view(x.size(0), -1)
+        x = self.fc(x)
+        x = F.log_softmax(x, dim=1)
+        return x
+
+
+class MLP(nn.Module):
+    # INPUT_DIM = 28 * 28
+    # OUTPUT_DIM = 10
+    def __init__(self):
+        super().__init__()
+
+        self.input_fc = nn.Linear(28 * 28, 250)
+        self.hidden_fc = nn.Linear(250, 100)
+        self.output_fc = nn.Linear(100, 10)
+
+    def forward(self, x):
+        # x = [batch size, height, width]
+
+        batch_size = x.shape[0]
+
+        x = x.view(batch_size, -1)
+
+        # x = [batch size, height * width]
+
+        h_1 = F.relu(self.input_fc(x))
+
+        # h_1 = [batch size, 250]
+
+        h_2 = F.relu(self.hidden_fc(h_1))
+
+        # h_2 = [batch size, 100]
+
+        y_pred = self.output_fc(h_2)
+
+        # y_pred = [batch size, output dim]
+
+        return y_pred  # , h_2
+
+
+# Define AlexNet network structure
+class AlexNet(nn.Module):
+    def __init__(self, width_mult=1):
+        super(AlexNet, self).__init__()
+        self.layer1 = nn.Sequential(  # Input 1*28*28
+            nn.Conv2d(1, 32, kernel_size=3, padding=1),  # 32*28*28
+            nn.MaxPool2d(kernel_size=2, stride=2),  # 32*14*14
+            nn.ReLU(inplace=True),
+        )
+        self.layer2 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),  # 64*14*14
+            nn.MaxPool2d(kernel_size=2, stride=2),  # 64*7*7
+            nn.ReLU(inplace=True),
+        )
+        self.layer3 = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),  # 128*7*7
+        )
+        self.layer4 = nn.Sequential(
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),  # 256*7*7
+        )
+
+        self.layer5 = nn.Sequential(
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),  # 256*7*7
+            nn.MaxPool2d(kernel_size=3, stride=2),  # 256*3*3
+            nn.ReLU(inplace=True),
+        )
+        self.fc1 = nn.Linear(256 * 3 * 3, 1024)
+        self.fc2 = nn.Linear(1024, 512)
+        self.fc3 = nn.Linear(512, 10)
+
+    def forward(self, x):
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.layer5(x)
+        x = x.view(-1, 256 * 3 * 3)
+        x = self.fc1(x)
+        x = self.fc2(x)
+        x = self.fc3(x)
+        return x
+
+
 @torch.no_grad()
 def average_gradients(model, W):
     """ Gradient averaging. """
@@ -197,7 +357,7 @@ def average_gradients(model, W):
     dist.barrier()
 
 
-def consensus_average(model, W: torch.Tensor, link_rate_bps, option='mpi'):
+def consensus_average(model, W: torch.Tensor, B_ij: torch.Tensor, option='mpi'):
     if (option == 'nccl'):
         rank = dist.get_rank()
         world = dist.get_world_size()
@@ -226,9 +386,9 @@ def consensus_average(model, W: torch.Tensor, link_rate_bps, option='mpi'):
         torch.cuda.synchronize()
 
         # bandwidth limit(in time)
-        if link_rate_bps is not None:
+        if B_ij is not None:
             bytes_total = flat.numel() * flat.element_size() * len(nbr_ids)
-            time.sleep(bytes_total * 8 / link_rate_bps)
+            time.sleep(bytes_total * 8 / B_ij)
         # weighted aggreagation
         mixed = w_row[rank] * flat  # itself
         for j in nbr_ids:
@@ -257,6 +417,9 @@ def consensus_average(model, W: torch.Tensor, link_rate_bps, option='mpi'):
         grads = [p.grad.data.view(-1) for p in model.parameters()
                  if p.grad is not None]
         flat = torch.cat(grads)  # GPU Tensor
+        count = flat.numel()
+        bits_model = count * flat.element_size() * 8
+
         dtype = MPI.FLOAT if flat.dtype == torch.float32 else MPI.DOUBLE
 
         # find out connected neighbors(non-zero in W) and create buffer for each
@@ -264,13 +427,20 @@ def consensus_average(model, W: torch.Tensor, link_rate_bps, option='mpi'):
         recv_bufs = {j: torch.empty_like(flat) for j in nbr_ids}
 
         # CUDA-aware P2P
-        count = flat.numel()
         reqs = []
         for j in nbr_ids:
             reqs.append(comm.Isend([flat.data, count, dtype], dest=j, tag=_global_tag))
-            logger.debug(f'sending from {rank} to {j}, tag: {_global_tag},count: {count}')
+            # logger.debug(f'sending from {rank} to {j}, tag: {_global_tag},count: {count}')
             reqs.append(comm.Irecv([recv_bufs[j], count, dtype], source=j, tag=_global_tag))
-            logger.debug(f'{rank} recv from {j}, tag: {_global_tag},count: {count}')
+            # logger.debug(f'{rank} recv from {j}, tag: {_global_tag},count: {count}')
+
+        # simulate bandwidth delay
+        if B_ij is not None:
+            B_ij_row = B_ij[rank]
+            tx_times = [bits_model / (B_ij_row[j] * 1e6) for j in nbr_ids]
+            comm_latency = max(tx_times)
+            time.sleep(comm_latency.item())
+            logger.debug(f'delay: {comm_latency.item()}')
 
         # logger.debug('waiting...')
         MPI.Request.Waitall(reqs)
@@ -279,9 +449,6 @@ def consensus_average(model, W: torch.Tensor, link_rate_bps, option='mpi'):
         # logger.debug("yes!")
 
         # # bandwidth limit(in time)
-        if link_rate_bps is not None:
-            bytes_total = flat.numel() * flat.element_size() * len(nbr_ids)
-            time.sleep(bytes_total * 8 / link_rate_bps)
 
         # weighted aggreagation
         mixed = w_row[rank] * flat
@@ -303,7 +470,7 @@ def consensus_average(model, W: torch.Tensor, link_rate_bps, option='mpi'):
         raise ValueError('Unsupported option')
 
 
-def train_epoch(loader, W_gpu, link_rate_bps):
+def train_epoch(loader, W_gpu, B_ij):
     model.train()
     epoch_loss, correct, total = 0.0, 0, 0
 
@@ -317,7 +484,7 @@ def train_epoch(loader, W_gpu, link_rate_bps):
 
         loss.backward()
 
-        consensus_average(model, W_gpu, link_rate_bps=None)
+        consensus_average(model, W_gpu, B_ij)
         logger.debug('consensus_average done')
         optimizer.step()
 
@@ -361,23 +528,41 @@ def output_all(flag):
         return [0]
 
 
-def load_weight_matrix(filename, W_type=5):
+def load_matrix(filename, size: int, W_type=5):
     if W_type == 1:  # md
         W = sio.loadmat(filename)['W_md']
+        B = sio.loadmat(filename)['B_md']
     elif W_type == 2:  # mh
         W = sio.loadmat(filename)['W_mh']
+        B = sio.loadmat(filename)['B_mh']
     elif W_type == 3:  # bc
         W = sio.loadmat(filename)['W_bc']
+        B = sio.loadmat(filename)['B_bc']
     elif W_type == 4:  # fdla
         W = sio.loadmat(filename)['W_fdla']
+        B = sio.loadmat(filename)['B_fdla']
     elif W_type == 5:  # cent
         W = sio.loadmat(filename)['W_cent']
+        B = sio.loadmat(filename)['B_cent']
     elif W_type == 6:  # fully connected
         W = np.ones((int(size), int(size))) * (1 / size)
+        B = np.ones((int(size), int(size))) * 20 / (size * size)
     else:  # no communication
         W = np.identity(size)
+        B = np.zeros(int(size) * int(size))
 
-    return W
+    B_ij = np.zeros((size, size))
+    if np.count_nonzero(W) != len(B) + size:
+        raise ValueError('size of W and B do not match')
+    else:
+        k = 0
+        for i in range(size):
+            for j in range(size):
+                if W[i][j] != 0 and i != j:
+                    B_ij[i][j] = B[k]
+                    k += 1
+
+    return W, B_ij
 
 
 if __name__ == '__main__':
@@ -387,22 +572,25 @@ if __name__ == '__main__':
     parser.add_argument("--backend", type=str, default="nccl")  # GPU: nccl, CPU: gloo
     parser.add_argument("--w_type", type=int, default=5)  # 1~7
     parser.add_argument("--output", type=str, default='info')
+    parser.add_argument("--model", type=str, default='lenet')
+    parser.add_argument("--dataset", type=str, default='mnist')
+
     args = parser.parse_args()
     # set logger
     logger = setup_logger(args.output)
     # set cuda
     logger.debug("cwd =", pathlib.Path.cwd())
-    logger.debug("torch.version.cuda  :", torch.version.cuda)
-    logger.debug("torch.version.git   :", torch.version.git_version)
-    logger.debug("cuda.is_available() :", torch.cuda.is_available())
+    logger.debug("torch.version.cuda: %s", torch.version.cuda)
+    logger.debug("torch.version.git %s:", torch.version.git_version)
+    logger.debug("cuda.is_available(): %s", torch.cuda.is_available())
     if torch.cuda.is_available():
-        logger.debug("Driver capability :", torch.cuda.get_device_capability(0))
-        logger.debug("Device name       :", torch.cuda.get_device_name(0))
+        logger.debug("Driver capability: %s", torch.cuda.get_device_capability(0))
+        logger.debug("Device name: %s", torch.cuda.get_device_name(0))
     else:
         logger.warning('cuda not available!!!!')
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info('device: ', device)
+    logger.info('device: %s', device)
 
     buf = torch.zeros(10, device='cuda')
 
@@ -435,7 +623,7 @@ if __name__ == '__main__':
     flag = 0
 
     filename = 'fed/' + 'CENT_solutions_iter1_' + str(size) + 'workers_range' + str(range_) + '.mat'
-    W = load_weight_matrix(filename, W_type=W_type)
+    W, B_ij = load_matrix(filename, size, W_type)
 
     # W = [[0.5, 0.5], [0.5, 0.5]]
     # W = [[1 / 3, 1 / 3, 0, 1 / 3],
@@ -443,15 +631,19 @@ if __name__ == '__main__':
     #      [0, 1 / 3, 1 / 3, 1 / 3],
     #      [1 / 3, 0, 1 / 3, 1 / 3]]
 
-    logger.debug('w read success')
-    logger.debug(W)
-
-    # BW = 20 * 1e6  # 20 Mb/s  -->  20 MHz(≈1 bps/Hz)
-    BW = None
-
     W_gpu = torch.tensor(W, dtype=torch.float32,
                          device=torch.cuda.current_device(),
                          requires_grad=False)
+
+    eta = 4  # spectrum efficiency? bit/s/Hz（16-QAM≈4）
+    B_ij = eta * B_ij
+    # B_ij = None
+    B_ij_gpu = torch.tensor(B_ij, dtype=torch.float32,
+                            device=torch.cuda.current_device(),
+                            requires_grad=False)
+
+    logger.debug('mat read success')
+    logger.debug([W, B_ij])
 
     # training prepration
     torch.manual_seed(10 * dist.get_rank())
@@ -464,7 +656,20 @@ if __name__ == '__main__':
     logger.debug('dataset loaded')
 
     # model settings
-    model = create_lenet().to(device)
+    model_name = args.model
+    if model_name == 'lenet':
+        model = create_lenet().to(device)
+    elif model_name == 'alexnet':
+        model = AlexNet().to(device)
+    elif model_name == 'cnn':
+        model = CNN_Net().to(device)
+    elif model_name == 'net':
+        model = Net().to(device)
+    elif model_name == 'MLP':
+        model = MLP().to(device)
+    else:
+        raise ValueError('Model type not supported')
+
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     cec = nn.CrossEntropyLoss().to(device)
 
@@ -474,9 +679,9 @@ if __name__ == '__main__':
 
     start_time = time.time()
 
-    logger.info('start training:', rank)
+    logger.info(f'start training:{rank}')
     for epoch in range(n_epoch):
-        train_loss, train_acc = train_epoch(train_set, W_gpu, BW)
+        train_loss, train_acc = train_epoch(train_set, W_gpu, B_ij_gpu)
         val_loss, val_acc = evaluate(test_set)
 
         if rank == 0:
@@ -486,8 +691,8 @@ if __name__ == '__main__':
             test_acc_list.append(val_acc)
 
             logger.info(f"[Epoch {epoch:03d}] "
-                  f"train loss {train_loss:.4f}  acc {train_acc:.2f}%  "
-                  f"val loss {val_loss:.4f}  acc {val_acc:.2f}%")
+                        f"train loss {train_loss:.4f}  acc {train_acc:.2f}%  "
+                        f"val loss {val_loss:.4f}  acc {val_acc:.2f}%")
 
     if rank == 0:
         df = pd.DataFrame({

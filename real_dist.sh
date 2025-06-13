@@ -44,17 +44,8 @@ export PYTHONUNBUFFERED=1
 srun --mpi=pmi2 python real_dist.py \
      --epochs 20 \
      --backend nccl \
-     --w_type 5
-
-#srun --label python -m torch.distributed.run \
-#     --nnodes $SLURM_JOB_NUM_NODES \
-#     --nproc_per_node 1 \
-#     --node_rank $SLURM_NODEID \
-#     --rdzv_backend=c10d \
-#     --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
-#     real_dist.py \
-#     --epochs 10 \
-#     --backend nccl \
-#     --w_type 5
+     --w_type 5 \
+     --output debug \
+     --model lenet
 
 
