@@ -1,7 +1,5 @@
 import os
 
-from objax.zoo.convnet import ConvNet
-
 os.environ.setdefault("MPI4PY_RC_CUDA", "yes")
 
 import mpi4py
@@ -41,6 +39,7 @@ import time
 import os, pathlib
 import pandas as pd
 import logging
+import copy
 
 
 def setup_logger(log_level="info"):
@@ -124,38 +123,35 @@ def partition_dataset_niid(file_path: str, p: int, bsz: int):
         ]))
 
     N_class = 10
-    size = dist.get_world_size()
+    world_size = dist.get_world_size()
+    rank = dist.get_rank()
 
     """ create 10*6000 index list"""
-    labels = dataset.targets.tolist()
+    labels = dataset.targets
     index_pos_list = [(labels == i).nonzero(as_tuple=True)[0].tolist() for i in range(N_class)]
 
-    x = 0
-    y = 0
-    z = 0
     index_list = []
-    N_ = int((len(dataset) / size) / p)
-    for i in range(size):
-        index_list_worker = []
-        for j in range(p):
-            index_list_worker = index_list_worker + index_pos_list[y][z * N_:(z + 1) * N_]
-            if y == N_class - 1:  # move to the next class
-                y = 0
+    chunk_len = len(dataset) // world_size // p
+
+    for _ in range(world_size):
+        y, z = 0, 0  # ★ 每个 worker 重新计数
+        worker_idx = []
+        for _ in range(p):
+            start = z * chunk_len
+            end = (z + 1) * chunk_len
+            worker_idx.extend(index_pos_list[y][start:end])
+            y = (y + 1) % 10
+            if y == 0:
                 z += 1
-            else:
-                y += 1
-        x += 1  # move to the next worker
-        index_list.append(index_list_worker)
+        index_list.append(worker_idx)
 
     partition = DataPartitioner_niid(dataset, index_list)
-    train_set = []
-    for i in range(size):
-        partition_ = partition.use(i)
-        train_set_ = torch.utils.data.DataLoader(
-            partition_, batch_size=bsz, shuffle=True)
-        # print('  train_set',len(train_set))
-        train_set.append(train_set_)
-    return train_set  # n by 60000/n matrixs
+    subset = partition.use(rank)
+    loader = torch.utils.data.DataLoader(
+        subset, batch_size=bsz, shuffle=True, drop_last=False
+    )
+
+    return loader, bsz
 
 
 def partition_dataset(file_path, bsz):
@@ -415,7 +411,7 @@ def average_gradients(model, W):
     dist.barrier()
 
 
-def consensus_average(model, W: torch.Tensor, B_ij: torch.Tensor, option='mpi'):
+def consensus_average(model, W: torch.Tensor, B_ij: float, option='mpi'):
     if (option == 'nccl'):
         rank = dist.get_rank()
         world = dist.get_world_size()
@@ -494,17 +490,17 @@ def consensus_average(model, W: torch.Tensor, B_ij: torch.Tensor, option='mpi'):
 
         # simulate bandwidth delay
         if B_ij is not None:
-            B_ij_row = B_ij[rank]
-            tx_times = [bits_model / (B_ij_row[j] * 1e6) for j in nbr_ids]
-            comm_latency = max(tx_times)
-            time.sleep(comm_latency.item())
-            logger.debug(f'delay: {comm_latency.item()}')
+            comm_latency = bits_model / (B_ij * 1e6)
+            time.sleep(comm_latency)
+            # logger.debug(f'delay: {comm_latency.item()}')
 
-        # logger.debug('waiting...')
+        # logger.debug(f'{rank} waiting...')
         MPI.Request.Waitall(reqs)
-        # logger.debug('synchronizing...')
+        # logger.debug(f'{rank} synchronizing...')
         torch.cuda.synchronize(device)
-        # logger.debug("yes!")
+        # logger.debug(f'{rank} barrier...')
+        comm.Barrier()
+        # logger.debug(f'{rank} yes!')
 
         # # bandwidth limit(in time)
 
@@ -532,7 +528,10 @@ def train_epoch(loader, W_gpu, B_ij):
     model.train()
     epoch_loss, correct, total = 0.0, 0, 0
 
+    # logger.debug(f'{rank} {len(loader)}')
+    batch_idx = 0
     for data, target in loader:  # mini-batch loop
+        # print(f'{rank}: batch {batch_idx}')
         data = data.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
         optimizer.zero_grad(set_to_none=True)
@@ -543,7 +542,7 @@ def train_epoch(loader, W_gpu, B_ij):
         loss.backward()
 
         consensus_average(model, W_gpu, B_ij)
-        logger.debug('consensus_average done')
+        # logger.debug(f'{rank},consensus_average done')
         optimizer.step()
 
         # stats
@@ -552,21 +551,23 @@ def train_epoch(loader, W_gpu, B_ij):
         correct += (pred == target).sum().item()
         total += target.size(0)
 
+        batch_idx += 1
+
     avg_loss = epoch_loss / total
     acc = 100. * correct / total
     return avg_loss, acc
 
 
 @torch.no_grad()
-def evaluate(loader):
-    model.eval()
+def evaluate(loader, model1):
+    model1.eval()
     loss_sum, correct, total = 0.0, 0, 0
 
     for data, target in loader:
         data = data.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
 
-        output = model(data)
+        output = model1(data)
         loss = cec(output, target)
 
         loss_sum += loss.item() * target.size(0)
@@ -609,16 +610,17 @@ def load_matrix(filename, size: int, W_type=5):
         W = np.identity(size)
         B = np.zeros(int(size) * int(size))
 
-    B_ij = np.zeros((size, size))
-    if np.count_nonzero(W) != len(B) + size:
-        raise ValueError('size of W and B do not match')
-    else:
-        k = 0
-        for i in range(size):
-            for j in range(size):
-                if W[i][j] != 0 and i != j:
-                    B_ij[i][j] = B[k]
-                    k += 1
+    # B_ij = np.zeros((size, size))
+    # if np.count_nonzero(W) != len(B) + size:
+    #     raise ValueError('size of W and B do not match')
+    # else:
+    #     k = 0
+    #     for i in range(size):
+    #         for j in range(size):
+    #             if W[i][j] != 0 and i != j:
+    #                 B_ij[i][j] = B[k]
+    #                 k += 1
+    B_ij = np.min(B)
 
     return W, B_ij
 
@@ -637,7 +639,7 @@ def create_model(model_name, rank):
 
     model_fn = model_map[model_name]
     model = model_fn().to(device)
-    global_model = model_fn().to(device) if rank == 0 else None
+    global_model = copy.deepcopy(model).to(device)
 
     return model, global_model
 
@@ -647,40 +649,42 @@ def update_global_model(local_model, global_model):
     world_size = dist.get_world_size()
     rank = dist.get_rank()
 
-    for (name, param) in local_model.named_parameters():
-        tmp = param.data.clone()
+    if rank == 0:
+        g_params = dict(global_model.named_parameters())
+        g_buffers = dict(global_model.named_buffers())
 
-        dist.reduce(tmp, dst=0, op=dist.ReduceOp.SUM)
-
-        if rank == 0:
-            tmp /= world_size
-            global_param = dict(global_model.named_parameters())[name]
-            global_param.copy_(tmp)
-
-    for (name, buf) in local_model.named_buffers():
-        tmp = buf.data.clone()
+        # params
+    for name, param in local_model.named_parameters():
+        tmp = param.detach().clone()  # GPU 张量
         dist.reduce(tmp, dst=0, op=dist.ReduceOp.SUM)
         if rank == 0:
-            tmp /= world_size
-            global_buf = dict(global_model.named_buffers())[name]
-            global_buf.copy_(tmp)
+            g_params[name].copy_(tmp.div_(world_size))
+
+        # buffers
+    for name, buf in local_model.named_buffers():
+        tmp = buf.detach().clone()
+        dist.reduce(tmp, dst=0, op=dist.ReduceOp.SUM)
+        if rank == 0:
+            g_buffers[name].copy_(tmp.div_(world_size))
 
 
 if __name__ == '__main__':
     # parse param
     parser = argparse.ArgumentParser()
     parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--backend", type=str, default="nccl")  # GPU: nccl, CPU: gloo
     parser.add_argument("--w_type", type=int, default=5)  # 1~7
     parser.add_argument("--output", type=str, default='info')
     parser.add_argument("--model", type=str, default='lenet')
     parser.add_argument("--dataset", type=str, default='mnist')
+    parser.add_argument("--p", type=int, default=6)
 
     args = parser.parse_args()
     # set logger
     logger = setup_logger(args.output)
     # set cuda
-    logger.debug("cwd =", pathlib.Path.cwd())
+    logger.debug("cwd = %s", pathlib.Path.cwd())
     logger.debug("torch.version.cuda: %s", torch.version.cuda)
     logger.debug("torch.version.git %s:", torch.version.git_version)
     logger.debug("cuda.is_available(): %s", torch.cuda.is_available())
@@ -695,35 +699,31 @@ if __name__ == '__main__':
 
     buf = torch.zeros(10, device='cuda')
 
-    # try:
-    #     MPI.COMM_WORLD.Isend([buf, MPI.FLOAT], dest=(MPI.COMM_WORLD.Get_rank() + 1) % MPI.COMM_WORLD.Get_size(), tag=0)
-    #     logger.debug("CUDA-aware send appears to work ")
-    # except MPI.Exception as e:
-    #     logger.debug("CUDA-aware send FAILED ✘ :", e)
-
     # rank = int(os.environ["RANK"])
     # world_size = int(os.environ["WORLD_SIZE"])
     # logger.debug(f'rank={rank}, world_size={world_size}', flush=True)
-    # master_addr = os.environ["MASTER_ADDR"]
-    # master_port = os.environ["MASTER_PORT"]
+    master_addr = os.environ["MASTER_ADDR"]
+    master_port = os.environ["MASTER_PORT"]
 
     os.environ["RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(world_size)
 
     # init multi nodes
     dist.init_process_group(backend=args.backend, init_method="env://")
+    # dist.init_process_group(backend=args.backend, init_method="mpi")
 
     logger.debug("DDP/NCCL init ok")
 
     # load weight matrix and put it on gpu
     W_type = args.w_type
     n_epoch = args.epochs
-    range_ = 60
-    size = 4
-    p = 6 # num labels 1-10
+    batch_size = args.batch_size
 
-    filename = 'fed/' + 'CENT_solutions_iter1_' + str(size) + 'workers_range' + str(range_) + '.mat'
-    W, B_ij = load_matrix(filename, size, W_type)
+    range_ = 60
+    p = args.p  # num of labels 1-10
+
+    filename = 'fed/' + 'CENT_solutions_iter1_' + str(world_size) + 'workers_range' + str(range_) + '.mat'
+    W, B_ij = load_matrix(filename, world_size, W_type)
 
     # W = [[0.5, 0.5], [0.5, 0.5]]
     # W = [[1 / 3, 1 / 3, 0, 1 / 3],
@@ -738,9 +738,9 @@ if __name__ == '__main__':
     eta = 4  # spectrum efficiency? bit/s/Hz（16-QAM≈4）
     B_ij = eta * B_ij
     # B_ij = None
-    B_ij_gpu = torch.tensor(B_ij, dtype=torch.float32,
-                            device=torch.cuda.current_device(),
-                            requires_grad=False)
+    # B_ij_gpu = torch.tensor(B_ij, dtype=torch.float32,
+    #                         device=torch.cuda.current_device(),
+    #                         requires_grad=False)
 
     logger.debug('mat read success')
     logger.debug([W, B_ij])
@@ -751,7 +751,7 @@ if __name__ == '__main__':
     # load MNIST dataset
     # here i iid data, can also use the non-iid case as in the simulation code
     file_path = 'fed/datasets'
-    train_set, bsz = partition_dataset_niid(file_path, p=6, bsz=4096)
+    train_set, bsz = partition_dataset_niid(file_path, p=6, bsz=batch_size)
     test_set, test_bsz = partition_dataset_test(file_path, bsz=10000)
     logger.debug('dataset loaded')
 
@@ -766,22 +766,41 @@ if __name__ == '__main__':
     train_acc_list = []
     test_acc_list = []
 
+    logger.info(f'start training:{rank}')
     start_time = time.time()
 
-    logger.info(f'start training:{rank}')
     for epoch in range(n_epoch):
-        train_loss, train_acc = train_epoch(train_set, W_gpu, B_ij_gpu)
+        train_loss, train_acc = train_epoch(train_set, W_gpu, B_ij)
+        logger.debug(f'{rank}, epoch: {epoch} completed')
+        comm.Barrier()
+        logger.debug(f'{rank} enter global')
+        global_model.load_state_dict(model.state_dict())
 
-        update_global_model(model, global_model)
+        with torch.no_grad():
+            for param in global_model.parameters():
+                dist.reduce(param.data, dst=0, op=dist.ReduceOp.SUM)
+
+        # val_loss, val_acc = evaluate(test_set, model)
+
+        # device_id = torch.cuda.current_device()  # ①
+        # dist.barrier(device_ids=[device_id])
+        #
+        # logger.debug(f'{rank} enter global')
+        # update_global_model(model, global_model)
+        logger.debug(f'{rank} leave global')
 
         if rank == 0:
-            val_loss, val_acc = evaluate(test_set, model)
+            for param in global_model.parameters():
+                param.data /= world_size
+
+            val_loss, val_acc = evaluate(test_set, global_model)
+            # val_loss, val_acc = evaluate(test_set, model)
             elapsed_time = time.time() - start_time
             timeline.append(elapsed_time)
             train_acc_list.append(train_acc)
             test_acc_list.append(val_acc)
 
-            logger.info(f"[Epoch {epoch:03d}] "
+            logger.info(f"[Epoch {(epoch + 1):03d}] "
                         f"train loss {train_loss:.4f}  acc {train_acc:.2f}%  "
                         f"val loss {val_loss:.4f}  acc {val_acc:.2f}%")
 
@@ -791,9 +810,11 @@ if __name__ == '__main__':
             'train_acc': train_acc_list,
             'test_acc': test_acc_list
         })
-        df.to_csv(f'data/acc_vs_time_{model_name}_{args.dataset}_{world_size}_{p}_w_{W_type}_epoch_{n_epoch}.csv', index=False)
+        df.to_csv(
+            f'data/{model_name}_{args.dataset}_N_{world_size}_p_{p}_w_{W_type}_e_{n_epoch}_b_{batch_size}.csv',
+            index=False)
         logger.info('data saved')
 
     # end process in case memory leak
     dist.destroy_process_group()
-    logger.info('completed')
+    logger.info(f'{rank} completed')

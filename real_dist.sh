@@ -1,18 +1,23 @@
 #!/bin/bash
 #SBATCH --job-name=real_dist
-#SBATCH --nodes=4
+#SBATCH --nodes=8
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=1
-#SBATCH --time=00:15:00
+#SBATCH --time=01:00:00
 #SBATCH --mem=2G
 #SBATCH --output=%x_%j_%t.out
 
 set -euo pipefail                # print and exit immediately after error
 set -x
 
-source venv/bin/activate
 module load cuda/12.2
 module load openmpi/4.1.5
+module load mpi4py/4.0.3
+module load python/3.11.5
+module load ucx-cuda/1.14.1
+module load ucc-cuda/1.2.0
+source venv/bin/activate
+
 
 
 export UCX_TLS=rc,cuda_copy,cuda_ipc,tcp
@@ -41,11 +46,29 @@ export CUDA_LAUNCH_BLOCKING=1          # GPU error
 export PYTHONFAULTHANDLER=1            # python error
 export PYTHONUNBUFFERED=1
 
-srun --mpi=pmi2 python real_dist.py \
-     --epochs 20 \
-     --backend nccl \
-     --w_type 5 \
-     --output debug \
-     --model lenet
+#srun --mpi=pmi2 python real_dist.py \
+#     --batch_size 4096 \
+#     --epochs 20 \
+#     --backend nccl \
+#     --w_type 5 \
+#     --output debug \
+#     --model lenet
 
+PARAMS_LIST=(
+    "--batch_size 1024 --epochs 100 --backend nccl --w_type 5 --output info --model lenet --p 6"
+#    "--batch_size 2048 --epochs 100 --backend nccl --w_type 5 --output info --model lenet --p 6"
+#    "--batch_size 4096 --epochs 100 --backend nccl --w_type 5 --output info --model lenet --p 6"
+#    "--batch_size 512 --epochs 100 --backend nccl --w_type 5 --output info --model lenet --p 6"
+#    "--batch_size 256 --epochs 100 --backend nccl --w_type 5 --output info --model lenet --p 6"
+#    "--batch_size 256 --epochs 100 --backend nccl --w_type 4 --output info --model lenet --p 6"
+#    "--batch_size 256 --epochs 100 --backend nccl --w_type 3 --output info --model lenet --p 6"
+#    "--batch_size 256 --epochs 100 --backend nccl --w_type 2 --output info --model lenet --p 6"
+#    "--batch_size 256 --epochs 100 --backend nccl --w_type 1 --output info --model lenet --p 6"
+)
 
+for param in "${PARAMS_LIST[@]}"; do
+    echo "======= $(date): running $param ======="
+    srun --mpi=pmi2 python real_dist.py $param
+done
+
+echo "All runs finished!"
