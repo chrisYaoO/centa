@@ -757,9 +757,9 @@ if __name__ == '__main__':
     for epoch in range(n_epoch):
         train_loss, train_acc = train_epoch(train_set, W_gpu, B_ij)
         test_loss, test_acc = evaluate(test_set, model)
-        logging.debug(f"{rank}: [Epoch {epoch:03d}] "
-                      f"train loss {train_loss:.4f}  acc {train_acc:.2f}%\n"
-                      f"local test loss {test_loss:.4f}  acc {test_acc:.2f}%")
+        logger.debug(f"{rank}: [Epoch {epoch:03d}] "
+                     f"train loss {train_loss:.4f}  acc {train_acc:.2f}%\n"
+                     f"local test loss {test_loss:.4f}  acc {test_acc:.2f}%")
 
         logger.debug(f'{rank}, epoch: {epoch} completed')
         comm.Barrier()

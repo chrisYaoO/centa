@@ -3,7 +3,7 @@
 #SBATCH --nodes=8
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=1
-#SBATCH --time=15:00:00
+#SBATCH --time=11:00:00
 #SBATCH --mem=2G
 #SBATCH --output=%x_%j_%t.out
 
@@ -55,16 +55,16 @@ export PYTHONUNBUFFERED=1
 #     --model lenet
 
 PARAMS_LIST=(
-#    "--batch_size 512 --epochs 100 --backend nccl --w_type 5 --output info --model lenet --p 10"
+    "--batch_size 512 --epochs 100 --backend nccl --w_type 5 --output info --model lenet --p 10"
     "--batch_size 512 --epochs 100 --backend nccl --w_type 5 --output info --model lenet --p 6"
-#    "--batch_size 512 --epochs 100 --backend nccl --w_type 4 --output info --model lenet --p 10"
-#    "--batch_size 512 --epochs 100 --backend nccl --w_type 3 --output info --model lenet --p 10"
-#    "--batch_size 512 --epochs 100 --backend nccl --w_type 2 --output info --model lenet --p 10"
-#    "--batch_size 512 --epochs 100 --backend nccl --w_type 1 --output info --model lenet --p 10"
-#    "--batch_size 512 --epochs 100 --backend nccl --w_type 4 --output info --model lenet --p 6"
-#    "--batch_size 512 --epochs 100 --backend nccl --w_type 3 --output info --model lenet --p 6"
-#    "--batch_size 512 --epochs 100 --backend nccl --w_type 2 --output info --model lenet --p 6"
-#    "--batch_size 512 --epochs 100 --backend nccl --w_type 1 --output info --model lenet --p 6"
+    "--batch_size 512 --epochs 100 --backend nccl --w_type 4 --output info --model lenet --p 10"
+    "--batch_size 512 --epochs 100 --backend nccl --w_type 3 --output info --model lenet --p 10"
+    "--batch_size 512 --epochs 100 --backend nccl --w_type 2 --output info --model lenet --p 10"
+    "--batch_size 512 --epochs 100 --backend nccl --w_type 1 --output info --model lenet --p 10"
+    "--batch_size 512 --epochs 100 --backend nccl --w_type 4 --output info --model lenet --p 6"
+    "--batch_size 512 --epochs 100 --backend nccl --w_type 3 --output info --model lenet --p 6"
+    "--batch_size 512 --epochs 100 --backend nccl --w_type 2 --output info --model lenet --p 6"
+    "--batch_size 512 --epochs 100 --backend nccl --w_type 1 --output info --model lenet --p 6"
 )
 
 for param in "${PARAMS_LIST[@]}"; do
