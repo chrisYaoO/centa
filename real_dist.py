@@ -30,6 +30,7 @@ import torch.optim as optim
 from torch.multiprocessing import Process
 from torch.autograd import Variable
 from torchvision import datasets, transforms
+from torch.nn.utils import parameters_to_vector, vector_to_parameters
 
 from random import Random
 import scipy.io as sio
@@ -420,10 +421,10 @@ def consensus_average(model, W: torch.Tensor, B_ij: float, option='mpi'):
         device = next(model.parameters()).device  # GPU 0, 1, ...
         w_row = W[rank].to(device)  # move current row to gpu
 
-        # flatten grads
-        grads = [p.grad.data.view(-1) for p in model.parameters()
-                 if p.grad is not None]
-        flat = torch.cat(grads)  # (d,)
+        # flatten params
+        params = [p.grad.data.view(-1) for p in model.parameters()
+                  if p.grad is not None]
+        flat = torch.cat(params)  # (d,)
 
         # find out connected neighbors(non-zero in W) and create buffer for each
         nbr_ids = [j for j, w in enumerate(w_row) if j != rank and w != 0]
@@ -467,10 +468,10 @@ def consensus_average(model, W: torch.Tensor, B_ij: float, option='mpi'):
         device = next(model.parameters()).device  # GPU 0, 1, ...
         w_row = W[rank].to(device)  # move current row to gpu
 
-        # flatten grads
-        grads = [p.grad.data.view(-1) for p in model.parameters()
-                 if p.grad is not None]
-        flat = torch.cat(grads)  # GPU Tensor
+        # flatten params
+        params = [p.data.view(-1) for p in model.parameters()
+                  if p.grad is not None]
+        flat = torch.cat(params)  # GPU Tensor
         count = flat.numel()
         bits_model = count * flat.element_size() * 8
 
@@ -510,13 +511,11 @@ def consensus_average(model, W: torch.Tensor, B_ij: float, option='mpi'):
             mixed += w_row[j] * recv_bufs[j]
         # normalize: mixed /= w_row.sum()
 
-        # # update the grad and tag
+        # # update the params and tag
         idx = 0
         for p in model.parameters():
-            if p.grad is None:
-                continue
-            n = p.grad.data.numel()
-            p.grad.data.copy_(mixed[idx:idx + n].view_as(p.grad))
+            n = p.data.numel()
+            p.data.copy_(mixed[idx:idx + n].view_as(p))
             idx += n
 
         _global_tag += 1
@@ -639,33 +638,12 @@ def create_model(model_name, rank):
 
     model_fn = model_map[model_name]
     model = model_fn().to(device)
-    global_model = copy.deepcopy(model).to(device)
+    if rank == 0:
+        global_model = copy.deepcopy(model).to(device)
+    else:
+        global_model = None
 
     return model, global_model
-
-
-@torch.no_grad()
-def update_global_model(local_model, global_model):
-    world_size = dist.get_world_size()
-    rank = dist.get_rank()
-
-    if rank == 0:
-        g_params = dict(global_model.named_parameters())
-        g_buffers = dict(global_model.named_buffers())
-
-        # params
-    for name, param in local_model.named_parameters():
-        tmp = param.detach().clone()  # GPU 张量
-        dist.reduce(tmp, dst=0, op=dist.ReduceOp.SUM)
-        if rank == 0:
-            g_params[name].copy_(tmp.div_(world_size))
-
-        # buffers
-    for name, buf in local_model.named_buffers():
-        tmp = buf.detach().clone()
-        dist.reduce(tmp, dst=0, op=dist.ReduceOp.SUM)
-        if rank == 0:
-            g_buffers[name].copy_(tmp.div_(world_size))
 
 
 if __name__ == '__main__':
@@ -751,7 +729,11 @@ if __name__ == '__main__':
     # load MNIST dataset
     # here i iid data, can also use the non-iid case as in the simulation code
     file_path = 'fed/datasets'
-    train_set, bsz = partition_dataset_niid(file_path, p=6, bsz=batch_size)
+    if p == 10:
+        train_set, bsz = partition_dataset(file_path, bsz=batch_size)
+    else:
+        train_set, bsz = partition_dataset_niid(file_path, p=args.p, bsz=batch_size)
+
     test_set, test_bsz = partition_dataset_test(file_path, bsz=10000)
     logger.debug('dataset loaded')
 
@@ -765,44 +747,64 @@ if __name__ == '__main__':
     timeline = []
     train_acc_list = []
     test_acc_list = []
+    global_acc_list = []
+    tag_base = 4321
 
     logger.info(f'start training:{rank}')
     start_time = time.time()
+    layer_name = 'fc.weight'
 
     for epoch in range(n_epoch):
         train_loss, train_acc = train_epoch(train_set, W_gpu, B_ij)
+        test_loss, test_acc = evaluate(test_set, model)
+        logging.debug(f"{rank}: [Epoch {epoch:03d}] "
+                      f"train loss {train_loss:.4f}  acc {train_acc:.2f}%\n"
+                      f"local test loss {test_loss:.4f}  acc {test_acc:.2f}%")
+
         logger.debug(f'{rank}, epoch: {epoch} completed')
         comm.Barrier()
         logger.debug(f'{rank} enter global')
-        global_model.load_state_dict(model.state_dict())
 
-        with torch.no_grad():
-            for param in global_model.parameters():
-                dist.reduce(param.data, dst=0, op=dist.ReduceOp.SUM)
+        vec_local = parameters_to_vector(model.parameters()).detach().contiguous()
 
-        # val_loss, val_acc = evaluate(test_set, model)
+        numel = vec_local.numel()
+        dtype_mpi = MPI.FLOAT if vec_local.dtype == torch.float32 else MPI.DOUBLE
+        tag_cur = tag_base + epoch
 
-        # device_id = torch.cuda.current_device()  # ①
-        # dist.barrier(device_ids=[device_id])
-        #
-        # logger.debug(f'{rank} enter global')
-        # update_global_model(model, global_model)
-        logger.debug(f'{rank} leave global')
+        if rank != 0:
+            send_req = comm.Isend([vec_local, dtype_mpi], dest=0, tag=tag_cur)
+            send_req.Wait()
 
-        if rank == 0:
-            for param in global_model.parameters():
-                param.data /= world_size
-
-            val_loss, val_acc = evaluate(test_set, global_model)
-            # val_loss, val_acc = evaluate(test_set, model)
+        else:
             elapsed_time = time.time() - start_time
+
+            buf_sum = vec_local.clone()
+            recv_reqs = []
+            for src in range(1, world_size):
+                buf = torch.empty(numel, dtype=vec_local.dtype, device=device)
+                req = comm.Irecv([buf, dtype_mpi], source=src, tag=tag_cur)
+                recv_reqs.append((req, buf))
+
+            for req, buf in recv_reqs:
+                req.Wait()
+                buf_sum.add_(buf)
+
+            buf_avg = buf_sum.div_(world_size)
+            vector_to_parameters(buf_avg, global_model.parameters())
+
+            global_model.eval()
+            global_test_loss, global_test_acc = evaluate(test_set, global_model)
+
             timeline.append(elapsed_time)
             train_acc_list.append(train_acc)
-            test_acc_list.append(val_acc)
+            test_acc_list.append(test_acc)
+            global_acc_list.append(global_test_acc)
 
-            logger.info(f"[Epoch {(epoch + 1):03d}] "
-                        f"train loss {train_loss:.4f}  acc {train_acc:.2f}%  "
-                        f"val loss {val_loss:.4f}  acc {val_acc:.2f}%")
+            logger.info(
+                f"[Epoch {epoch:03d}] "
+                f"train loss {train_loss:.4f}  acc {train_acc:.2f}%\n"
+                f"local test loss {test_loss:.4f}  acc {test_acc:.2f}%\n"
+                f"global test loss {global_test_loss:.4f}  acc {global_test_acc:.2f}%")
 
     if rank == 0:
         df = pd.DataFrame({
