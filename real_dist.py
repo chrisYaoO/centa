@@ -134,16 +134,20 @@ def partition_dataset_niid(file_path: str, p: int, bsz: int):
     index_list = []
     chunk_len = len(dataset) // world_size // p
 
-    for _ in range(world_size):
-        y, z = 0, 0  # ★ 每个 worker 重新计数
+    y = 0
+    z = 0
+    for worker in range(world_size):
         worker_idx = []
         for _ in range(p):
             start = z * chunk_len
             end = (z + 1) * chunk_len
             worker_idx.extend(index_pos_list[y][start:end])
-            y = (y + 1) % 10
-            if y == 0:
+
+            if y == N_class - 1:
+                y = 0
                 z += 1
+            else:
+                y += 1
         index_list.append(worker_idx)
 
     partition = DataPartitioner_niid(dataset, index_list)
