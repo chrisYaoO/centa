@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=real_dist
-#SBATCH --nodes=8
+#SBATCH --nodes=20
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=1
 #SBATCH --time=00:30:00
