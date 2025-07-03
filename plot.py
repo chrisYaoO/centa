@@ -10,10 +10,10 @@ import matplotlib.pyplot as plt
 
 csv_paths = glob.glob("data/*.csv")
 
-W_type = ['MD', 'MH', 'BC', 'FDLA', 'CENT']
+W_type = ['MD', 'MH', 'BC', 'FDLA', 'CENT', 'FC', 'NC', 'CENT-A']
 pattern = re.compile(
     r"""
-    ^data/
+    ^data
     (?P<model>.+?)_                       # model_name  (贪婪最小匹配到下一个 "_")
     (?P<dataset>.+?)_
     N_(?P<N>\d+)_                         # world_size
@@ -51,10 +51,13 @@ for ax in axes:
     ax.set_ylabel('Test Accuracy')
     ax.grid(True)
     ax.set_ylim(0, 100)
+    ax.set_xlim(0, 3500)
 axes[0].set_title('p=6')
 axes[1].set_title('p=10')
 # plt.xlabel('time')
 # plt.ylabel('global_test_acc')
-plt.tight_layout()
-plt.suptitle('MNIST_Lenet_100_epochs_512_bsz_8_workers')
+fig.tight_layout()
+title = 'MNIST_Lenet_100_epochs_1024_bsz_20_workers'
+fig.suptitle(title)
 plt.show()
+fig.savefig('results/'+title+'.png')

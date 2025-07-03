@@ -41,6 +41,7 @@ import os, pathlib
 import pandas as pd
 import logging
 import copy
+import random, math
 
 
 def setup_logger(log_level="info"):
@@ -111,40 +112,109 @@ class DataPartitioner_niid(object):
         return Partition(self.data, self.partitions[partition])
 
 
-def partition_dataset_niid(file_path: str, p: int, bsz: int):
-    """ Partitioning MNIST """
+# def partition_dataset_niid(file_path: str, p: int, bsz: int):
+#     """ Partitioning MNIST """
+#
+#     dataset = datasets.MNIST(
+#         root=file_path,
+#         train=True,
+#         download=False,
+#         transform=transforms.Compose([
+#             transforms.ToTensor(),
+#             transforms.Normalize((0.1307,), (0.3081,))
+#         ]))
+#
+#     N_class = 10
+#     world_size = dist.get_world_size()
+#     rank = dist.get_rank()
+#
+#     """ create 10*6000 index list"""
+#     labels = dataset.targets
+#     index_pos_list = [(labels == i).nonzero(as_tuple=True)[0].tolist() for i in range(N_class)]
+#
+#     index_list = []
+#     chunk_len = len(dataset) // world_size // p
+#
+#     y = 0
+#     z = 0
+#     for worker in range(world_size):
+#         worker_idx = []
+#         for _ in range(p):
+#             start = z * chunk_len
+#             end = (z + 1) * chunk_len
+#             worker_idx.extend(index_pos_list[y][start:end])
+#
+#             if y == N_class - 1:
+#                 y = 0
+#                 z += 1
+#             else:
+#                 y += 1
+#         index_list.append(worker_idx)
+#
+#     partition = DataPartitioner_niid(dataset, index_list)
+#     subset = partition.use(rank)
+#     loader = torch.utils.data.DataLoader(
+#         subset, batch_size=bsz, shuffle=True, drop_last=False
+#     )
+#
+#     return loader, bsz
 
+def partition_dataset_niid_equal(root, p, bsz, seed=0, shuffle=True):
+    """
+    root        : MNIST 路径
+    world_size  : worker 数
+    rank        : 当前进程 rank (0 … world_size-1)
+    p           : 每个 worker 可见的类别数
+    batch_size  : 训练 DataLoader 的 batch 大小
+    """
+    # 1) 载入并打乱 MNIST
+    world_size = dist.get_world_size()
+    rank = dist.get_rank()
+    torch.manual_seed(seed)
     dataset = datasets.MNIST(
-        root=file_path,
-        train=True,
-        download=False,
+        root=root, train=True, download=True,
         transform=transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize((0.1307,), (0.3081,))
         ]))
+    labels = dataset.targets.numpy()  # shape (60000,)
 
-    N_class = 10
-    world_size = dist.get_world_size()
-    rank = dist.get_rank()
+    # 2) 为 10 个类别各取索引并随机打乱
+    idx_by_cls = [np.where(labels == c)[0].tolist() for c in range(10)]
+    if shuffle:
+        for idx in idx_by_cls: random.shuffle(idx)
 
-    """ create 10*6000 index list"""
-    labels = dataset.targets
-    index_pos_list = [(labels == i).nonzero(as_tuple=True)[0].tolist() for i in range(N_class)]
+    # 3) 计算 —— 每个类别被“选中”多少次
+    total_slots = world_size * p  # 这里是 8*6 = 48
+    base_cnt = total_slots // 10  # 等于 4
+    extra = total_slots % 10  # 等于 8
+    # 前 extra 个类别出现 base_cnt+1 次，其余出现 base_cnt 次
+    appear_cnt = [base_cnt + (1 if c < extra else 0) for c in range(10)]
 
-    index_list = []
-    chunk_len = len(dataset) // world_size // p
+    # 4) 把每个类别均匀切成 appear_cnt[c] 份（长度差 ≤1）
+    chunks_by_cls = {
+        c: np.array_split(idx_by_cls[c], appear_cnt[c])
+        for c in range(10)
+    }
 
-    for _ in range(world_size):
-        y, z = 0, 0  # ★ 每个 worker 重新计数
-        worker_idx = []
+    # 5) 生成一个长度 total_slots 的类别序列：0→9 循环即可
+    cls_seq = [i % 10 for i in range(total_slots)]  # [0,1,2,…,9,0,1,…]
+
+    # 6) 依次把序列中的块派发给 worker
+    ptr = [0] * 10  # 指针：该类别已取到第几个块
+    index_list = [[] for _ in range(world_size)]
+    slot = 0
+    for w in range(world_size):
         for _ in range(p):
-            start = z * chunk_len
-            end = (z + 1) * chunk_len
-            worker_idx.extend(index_pos_list[y][start:end])
-            y = (y + 1) % 10
-            if y == 0:
-                z += 1
-        index_list.append(worker_idx)
+            c = cls_seq[slot]
+            index_list[w].extend(chunks_by_cls[c][ptr[c]])
+            ptr[c] += 1
+            slot += 1
+
+    # 7) 统一裁成 batch_size 的整数倍，保证 batch 数一致
+    samples_per_worker = min(len(lst) for lst in index_list)
+    for w in range(world_size):
+        index_list[w] = index_list[w][:samples_per_worker]
 
     partition = DataPartitioner_niid(dataset, index_list)
     subset = partition.use(rank)
@@ -605,9 +675,12 @@ def load_matrix(filename, size: int, W_type=5):
     elif W_type == 6:  # fully connected
         W = np.ones((int(size), int(size))) * (1 / size)
         B = np.ones((int(size), int(size))) * 20 / (size * size)
-    else:  # no communication
+    elif W_type == 7:  # no communication
         W = np.identity(size)
         B = np.zeros(int(size) * int(size))
+    else:  # centa
+        W = sio.loadmat(filename)['W_centa']
+        B = sio.loadmat(filename)['B_centa']
 
     # B_ij = np.zeros((size, size))
     # if np.count_nonzero(W) != len(B) + size:
@@ -652,7 +725,7 @@ if __name__ == '__main__':
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--backend", type=str, default="nccl")  # GPU: nccl, CPU: gloo
-    parser.add_argument("--w_type", type=int, default=5)  # 1~7
+    parser.add_argument("--w_type", type=int, default=5)  # 1~8
     parser.add_argument("--output", type=str, default='info')
     parser.add_argument("--model", type=str, default='lenet')
     parser.add_argument("--dataset", type=str, default='mnist')
@@ -732,10 +805,10 @@ if __name__ == '__main__':
     if p == 10:
         train_set, bsz = partition_dataset(file_path, bsz=batch_size)
     else:
-        train_set, bsz = partition_dataset_niid(file_path, p=args.p, bsz=batch_size)
+        train_set, bsz = partition_dataset_niid_equal(file_path, p=args.p, bsz=batch_size)
 
     test_set, test_bsz = partition_dataset_test(file_path, bsz=10000)
-    logger.debug('dataset loaded')
+    logger.debug(f'{rank}: data len {len(train_set)}')
 
     # model settings
     model_name = args.model
@@ -810,7 +883,8 @@ if __name__ == '__main__':
         df = pd.DataFrame({
             'time': timeline,
             'train_acc': train_acc_list,
-            'test_acc': test_acc_list
+            'local_test_acc': test_acc_list,
+            'test_acc': global_acc_list
         })
         df.to_csv(
             f'data/{model_name}_{args.dataset}_N_{world_size}_p_{p}_w_{W_type}_e_{n_epoch}_b_{batch_size}.csv',

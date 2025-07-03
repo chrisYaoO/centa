@@ -22,9 +22,12 @@ def load_matrix(filename, size: int, W_type=5):
     elif W_type == 6:  # fully connected
         W = np.ones((int(size), int(size))) * (1 / size)
         B = np.ones((int(size), int(size))) * 20 / (size * size)
-    else:  # no communication
+    elif W_type == 7:  # no communication
         W = np.identity(size)
         B = np.zeros(int(size) * int(size))
+    else:  # centa
+        W = sio.loadmat(filename)['W_centa']
+        B = sio.loadmat(filename)['B_centa']
 
     # B_ij = np.zeros((size, size))
     # if np.count_nonzero(W) != len(B) + size:
@@ -36,18 +39,18 @@ def load_matrix(filename, size: int, W_type=5):
     #             if W[i][j] != 0 and i != j:
     #                 B_ij[i][j] = B[k]
     #                 k += 1
+
+
     B_ij = np.min(B)
 
     return W, B_ij
 
-
-world_size = 8
+world_size = 20
 range_ = 60
 filename = 'CENT_solutions_iter1_' + str(world_size) + 'workers_range' + str(range_) + '.mat'
-for W_type in range(1, 6):
+for W_type in range(1, 9):
     W, B_ij = load_matrix(filename, world_size, W_type)
 
     eta = 4  # spectrum efficiency? bit/s/Hz（16-QAM≈4）
     # B_ij = eta * B_ij
-    print(W_type)
-    print(W[0])
+    print(B_ij)
