@@ -160,14 +160,7 @@ class DataPartitioner_niid(object):
 #     return loader, bsz
 
 def partition_dataset_niid_equal(root, p, bsz, seed=0, shuffle=True):
-    """
-    root        : MNIST 路径
-    world_size  : worker 数
-    rank        : 当前进程 rank (0 … world_size-1)
-    p           : 每个 worker 可见的类别数
-    batch_size  : 训练 DataLoader 的 batch 大小
-    """
-    # 1) 载入并打乱 MNIST
+    # load and shuffle dataset
     world_size = dist.get_world_size()
     rank = dist.get_rank()
     torch.manual_seed(seed)
@@ -179,29 +172,29 @@ def partition_dataset_niid_equal(root, p, bsz, seed=0, shuffle=True):
         ]))
     labels = dataset.targets.numpy()  # shape (60000,)
 
-    # 2) 为 10 个类别各取索引并随机打乱
+    # 2) get index for 10 classes and shuffle
     idx_by_cls = [np.where(labels == c)[0].tolist() for c in range(10)]
     if shuffle:
         for idx in idx_by_cls: random.shuffle(idx)
 
-    # 3) 计算 —— 每个类别被“选中”多少次
-    total_slots = world_size * p  # 这里是 8*6 = 48
-    base_cnt = total_slots // 10  # 等于 4
-    extra = total_slots % 10  # 等于 8
-    # 前 extra 个类别出现 base_cnt+1 次，其余出现 base_cnt 次
+    # compute number of class appearance in workers
+    total_slots = world_size * p
+    base_cnt = total_slots // 10
+    extra = total_slots % 10
+    #  extra: base_cnt+1, else: base_cnt
     appear_cnt = [base_cnt + (1 if c < extra else 0) for c in range(10)]
 
-    # 4) 把每个类别均匀切成 appear_cnt[c] 份（长度差 ≤1）
+    # divide into appear_cnt[c]  chuncks for each class
     chunks_by_cls = {
         c: np.array_split(idx_by_cls[c], appear_cnt[c])
         for c in range(10)
     }
 
-    # 5) 生成一个长度 total_slots 的类别序列：0→9 循环即可
+    # 0-9 cycle
     cls_seq = [i % 10 for i in range(total_slots)]  # [0,1,2,…,9,0,1,…]
 
-    # 6) 依次把序列中的块派发给 worker
-    ptr = [0] * 10  # 指针：该类别已取到第几个块
+    # assign allocated chunks to worker
+    ptr = [0] * 10 # pointer for each class
     index_list = [[] for _ in range(world_size)]
     slot = 0
     for w in range(world_size):
@@ -211,7 +204,7 @@ def partition_dataset_niid_equal(root, p, bsz, seed=0, shuffle=True):
             ptr[c] += 1
             slot += 1
 
-    # 7) 统一裁成 batch_size 的整数倍，保证 batch 数一致
+    # unify batch size
     samples_per_worker = min(len(lst) for lst in index_list)
     for w in range(world_size):
         index_list[w] = index_list[w][:samples_per_worker]
@@ -828,6 +821,7 @@ if __name__ == '__main__':
     layer_name = 'fc.weight'
 
     for epoch in range(n_epoch):
+        # train
         train_loss, train_acc = train_epoch(train_set, W_gpu, B_ij)
         test_loss, test_acc = evaluate(test_set, model)
         logger.debug(f"{rank}: [Epoch {epoch:03d}] "
@@ -838,6 +832,7 @@ if __name__ == '__main__':
         comm.Barrier()
         logger.debug(f'{rank} enter global')
 
+        # global average
         vec_local = parameters_to_vector(model.parameters()).detach().contiguous()
 
         numel = vec_local.numel()
@@ -865,6 +860,7 @@ if __name__ == '__main__':
             buf_avg = buf_sum.div_(world_size)
             vector_to_parameters(buf_avg, global_model.parameters())
 
+            # global model eval
             global_model.eval()
             global_test_loss, global_test_acc = evaluate(test_set, global_model)
 
@@ -879,6 +875,7 @@ if __name__ == '__main__':
                 f"local test loss {test_loss:.4f}  acc {test_acc:.2f}%\n"
                 f"global test loss {global_test_loss:.4f}  acc {global_test_acc:.2f}%")
 
+    # save result
     if rank == 0:
         df = pd.DataFrame({
             'time': timeline,

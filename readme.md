@@ -1,6 +1,6 @@
-# CENTA+beluga cluster
+# CENTA+Beluga Cluster
 
-### Matlab instructions by jinrong
+### Matlab instructions by Jingrong
 1. Install cvx packages on Matlab at http://cvxr.com
 
 2. run 'generate_graphs.m' to obtain the network information, including the topology, comm. and comp. time
@@ -25,15 +25,15 @@
 
 
 ### Current
-1. waiting for test result
-2. centa implementaiton
+1. I understand that W is obtained via FDLA and the link bandwidths via the min-max allocation. In the actual simulation, did you enforce these bandwidth constraints by
+introducing artificial time delays during gradient exchange, or
+directly modifying the communication bandwidth (e.g., throttling link rates)?
+2. On Compute Canada clusters, indeed I cannot control InfiniBand link rates, so I currently inject delays after each gradient-averaging step based on the slowest allocated bandwidth. Would you recommend continuing with my delay-injection approach, or simply omitting the bandwidth constraints entirely?
+3. In the actual simulation, was the pre-calculated consensus weight matrix W applied to average gradients once per batch or once per epoch?
+4. Is the niid partitioning in the simulation code identical to what you used for the paper (i.e., controlling the number of classes per device via p)?
+5. In the provided simulation code, gradient averaging across models is conducted once per epoch when using heterogeneous datasets. However, my understanding is that it would typically be done per batch. I assume the per-epoch is intentional, possibly because the niid partition function results in unequal batch counts across devices, which could cause synchronization issues. To address this, I modified the function to ensure the same number of batches per device while preserving the niid nature of the data—though it comes at the cost of using fewer training samples. Is it acceptable to use my modified niid partition function for the reproduction?
 
 ### Todo:
-1. run tests
-2. plot
+1. reproduce using same settings
 
 ### instructions
-
-
-
-
