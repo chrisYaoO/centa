@@ -112,52 +112,53 @@ class DataPartitioner_niid(object):
         return Partition(self.data, self.partitions[partition])
 
 
-# def partition_dataset_niid(file_path: str, p: int, bsz: int):
-#     """ Partitioning MNIST """
-#
-#     dataset = datasets.MNIST(
-#         root=file_path,
-#         train=True,
-#         download=False,
-#         transform=transforms.Compose([
-#             transforms.ToTensor(),
-#             transforms.Normalize((0.1307,), (0.3081,))
-#         ]))
-#
-#     N_class = 10
-#     world_size = dist.get_world_size()
-#     rank = dist.get_rank()
-#
-#     """ create 10*6000 index list"""
-#     labels = dataset.targets
-#     index_pos_list = [(labels == i).nonzero(as_tuple=True)[0].tolist() for i in range(N_class)]
-#
-#     index_list = []
-#     chunk_len = len(dataset) // world_size // p
-#
-#     y = 0
-#     z = 0
-#     for worker in range(world_size):
-#         worker_idx = []
-#         for _ in range(p):
-#             start = z * chunk_len
-#             end = (z + 1) * chunk_len
-#             worker_idx.extend(index_pos_list[y][start:end])
-#
-#             if y == N_class - 1:
-#                 y = 0
-#                 z += 1
-#             else:
-#                 y += 1
-#         index_list.append(worker_idx)
-#
-#     partition = DataPartitioner_niid(dataset, index_list)
-#     subset = partition.use(rank)
-#     loader = torch.utils.data.DataLoader(
-#         subset, batch_size=bsz, shuffle=True, drop_last=False
-#     )
-#
-#     return loader, bsz
+def partition_dataset_niid(file_path: str, p: int, bsz: int):
+    """ Partitioning MNIST """
+
+    dataset = datasets.MNIST(
+        root=file_path,
+        train=True,
+        download=False,
+        transform=transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.1307,), (0.3081,))
+        ]))
+
+    N_class = 10
+    world_size = dist.get_world_size()
+    rank = dist.get_rank()
+
+    """ create 10*6000 index list"""
+    labels = dataset.targets
+    index_pos_list = [(labels == i).nonzero(as_tuple=True)[0].tolist() for i in range(N_class)]
+
+    index_list = []
+    chunk_len = len(dataset) // world_size // p
+
+    y = 0
+    z = 0
+    for worker in range(world_size):
+        worker_idx = []
+        for _ in range(p):
+            start = z * chunk_len
+            end = (z + 1) * chunk_len
+            worker_idx.extend(index_pos_list[y][start:end])
+
+            if y == N_class - 1:
+                y = 0
+                z += 1
+            else:
+                y += 1
+        index_list.append(worker_idx)
+
+    partition = DataPartitioner_niid(dataset, index_list)
+    subset = partition.use(rank)
+    loader = torch.utils.data.DataLoader(
+        subset, batch_size=bsz, shuffle=True, drop_last=False
+    )
+
+    return loader, bsz
+
 
 def partition_dataset_niid_equal(root, p, bsz, seed=0, shuffle=True):
     # load and shuffle dataset
@@ -194,7 +195,7 @@ def partition_dataset_niid_equal(root, p, bsz, seed=0, shuffle=True):
     cls_seq = [i % 10 for i in range(total_slots)]  # [0,1,2,…,9,0,1,…]
 
     # assign allocated chunks to worker
-    ptr = [0] * 10 # pointer for each class
+    ptr = [0] * 10  # pointer for each class
     index_list = [[] for _ in range(world_size)]
     slot = 0
     for w in range(world_size):
@@ -603,7 +604,8 @@ def train_epoch(loader, W_gpu, B_ij):
 
         loss.backward()
 
-        consensus_average(model, W_gpu, B_ij)
+        # consensus_average(model, W_gpu, B_ij)
+
         # logger.debug(f'{rank},consensus_average done')
         optimizer.step()
 
@@ -716,7 +718,7 @@ if __name__ == '__main__':
     # parse param
     parser = argparse.ArgumentParser()
     parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch_size", type=int, default=512)
+    parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--backend", type=str, default="nccl")  # GPU: nccl, CPU: gloo
     parser.add_argument("--w_type", type=int, default=5)  # 1~8
     parser.add_argument("--output", type=str, default='info')
@@ -798,7 +800,8 @@ if __name__ == '__main__':
     if p == 10:
         train_set, bsz = partition_dataset(file_path, bsz=batch_size)
     else:
-        train_set, bsz = partition_dataset_niid_equal(file_path, p=args.p, bsz=batch_size)
+        # train_set, bsz = partition_dataset_niid_equal(file_path, p=args.p, bsz=batch_size)
+        train_set, bsz = partition_dataset_niid(file_path, p=args.p, bsz=batch_size)
 
     test_set, test_bsz = partition_dataset_test(file_path, bsz=10000)
     logger.debug(f'{rank}: data len {len(train_set)}')
@@ -823,6 +826,10 @@ if __name__ == '__main__':
     for epoch in range(n_epoch):
         # train
         train_loss, train_acc = train_epoch(train_set, W_gpu, B_ij)
+
+        # update per epoch without artificial time delay
+        consensus_average(model, W_gpu, B_ij=None)
+
         test_loss, test_acc = evaluate(test_set, model)
         logger.debug(f"{rank}: [Epoch {epoch:03d}] "
                      f"train loss {train_loss:.4f}  acc {train_acc:.2f}%\n"

@@ -27,7 +27,8 @@ pattern = re.compile(
 )
 
 p_list = [6, 10]
-fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+fig, axes = plt.subplots(1, 1, figsize=(12,6))
+axes=[axes,axes]
 for path in csv_paths:
     m = pattern.match(path)
     data = pd.read_csv(path)
@@ -42,7 +43,13 @@ for path in csv_paths:
         meta[key] = int(meta[key])
     print(meta)
     if meta['p'] == 6:
-        axes[0].plot(data['time'], data['test_acc'], label=W_type[meta['w'] - 1])
+        if meta['w'] == 8:
+            t = 80
+        elif meta['w'] == 5:
+            t = 87
+        else:
+            t = 110
+        axes[0].plot(np.arange(1,101)*t, data['test_acc'], label=W_type[meta['w'] - 1])
     else:
         axes[1].plot(data['time'], data['test_acc'], label=W_type[meta['w'] - 1])
 for ax in axes:
@@ -51,13 +58,13 @@ for ax in axes:
     ax.set_ylabel('Test Accuracy')
     ax.grid(True)
     ax.set_ylim(0, 100)
-    ax.set_xlim(0, 3500)
-axes[0].set_title('p=6')
-axes[1].set_title('p=10')
+    ax.set_xlim(0, 2000)
+# axes[0].set_title('p=6')
+# axes[1].set_title('p=10')
 # plt.xlabel('time')
 # plt.ylabel('global_test_acc')
 fig.tight_layout()
-title = 'MNIST_Lenet_100_epochs_1024_bsz_20_workers'
+title = 'MNIST_Lenet_100_epochs_256_bsz_20_workers'
 fig.suptitle(title)
 plt.show()
-fig.savefig('results/'+title+'.png')
+fig.savefig('results/' + title + '.png')
